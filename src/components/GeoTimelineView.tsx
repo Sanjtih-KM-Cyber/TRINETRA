@@ -26,7 +26,14 @@ import {
   Shield,
   Radio,
   Compass,
+  Expand,
+  Minimize2,
 } from "lucide-react";
+
+export interface MapFocusSignal {
+  nodeId: string;
+  nonce: number;
+}
 
 interface GeoTimelineViewProps {
   nodes: CrimeNetworkNode[];
@@ -36,6 +43,8 @@ interface GeoTimelineViewProps {
   financials: FinancialRecord[];
   intels: IntelRecord[];
   onSelectNode: (node: CrimeNetworkNode) => void;
+  /** Phase 2 — graph → map sync: pan + pop the marker for this node. */
+  focusSignal?: MapFocusSignal | null;
 }
 
 // Utility to create a polygon representing a cell tower azimuth sector wedge
@@ -74,6 +83,7 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
   financials,
   intels,
   onSelectNode,
+  focusSignal = null,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -81,6 +91,8 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
 
   // Layer groups
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
+  /** Phase 2 — graph ↔ map coordinate sync registry. */
+  const markerByNodeIdRef = useRef<Map<string, L.Marker>>(new Map());
   const towersLayerRef = useRef<L.LayerGroup | null>(null);
   const geofencesLayerRef = useRef<L.LayerGroup | null>(null);
   const trajectoryLayerRef = useRef<L.LayerGroup | null>(null);
@@ -154,6 +166,24 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
 
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(allEvents.length - 1);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  // TRINETRA spec — chronological playback paced at 4,000ms per step (default).
+  const [playbackSpeed, setPlaybackSpeed] = useState<"slow" | "normal" | "fast">("slow");
+  const PLAYBACK_MS = { slow: 4000, normal: 2500, fast: 1200 } as const;
+  // Phase 7 Req31 — viewport expansion toggle.
+  const viewRef = useRef<HTMLDivElement | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => undefined);
+    } else {
+      viewRef.current?.requestFullscreen?.().catch(() => undefined);
+    }
+  };
 
   // Initialize Map with 100% Free, Public, Reliable Tile Layers (No API Key Required)
   useEffect(() => {
@@ -163,19 +193,26 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
     const map = L.map(mapContainerRef.current, {
       center: [18.98, 72.93],
       zoom: 11,
-      attributionControl: false,
+      attributionControl: true,
     });
 
-    // Zero API key, highly reliable public tile providers
+    // Phase 7 Req30 — 100% open-source, keyless raster tiles (no proprietary layers):
+    // Dark + Streets via OpenStreetMap / CARTO (ODbL, attribution required and shown).
     const tileUrls = {
       dark: "https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png",
       satellite: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       streets: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     };
+    const tileCredits = {
+      dark: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      satellite: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
+      streets: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    };
 
     const baseLayer = L.tileLayer(tileUrls[mapStyle], {
       maxZoom: 19,
       subdomains: "abcd",
+      attribution: tileCredits[mapStyle],
     }).addTo(map);
     baseTileLayerRef.current = baseLayer;
 
@@ -194,7 +231,7 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
     };
   }, []);
 
-  // Update Base Tile Map Style
+  // Update Base Tile Map Style (keyless OSS tiles + attribution)
   useEffect(() => {
     if (!mapInstanceRef.current || !baseTileLayerRef.current) return;
     const tileUrls = {
@@ -202,9 +239,14 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
       satellite: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       streets: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     };
+    const tileCredits = {
+      dark: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      satellite: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
+      streets: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    };
 
     mapInstanceRef.current.removeLayer(baseTileLayerRef.current);
-    const newBase = L.tileLayer(tileUrls[mapStyle], { maxZoom: 19, subdomains: "abcd" }).addTo(mapInstanceRef.current);
+    const newBase = L.tileLayer(tileUrls[mapStyle], { maxZoom: 19, subdomains: "abcd", attribution: tileCredits[mapStyle] }).addTo(mapInstanceRef.current);
     baseTileLayerRef.current = newBase;
   }, [mapStyle]);
 
@@ -418,6 +460,7 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
     if (!markersLayerRef.current || !mapInstanceRef.current) return;
     const layer = markersLayerRef.current;
     layer.clearLayers();
+    markerByNodeIdRef.current.clear();
 
     const geoNodes = nodes.filter((n) => n.details?.geo?.lat && n.details?.geo?.lng);
     geoNodes.forEach((node) => {
@@ -461,8 +504,20 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
       `);
       marker.on("click", () => onSelectNode(node));
       marker.addTo(layer);
+      markerByNodeIdRef.current.set(node.id, marker);
     });
   }, [nodes, onSelectNode]);
+
+  // Phase 2 — graph → map sync: pan to the focused node and pop its marker.
+  useEffect(() => {
+    if (!focusSignal || !mapInstanceRef.current) return;
+    const marker = markerByNodeIdRef.current.get(focusSignal.nodeId);
+    if (!marker) return;
+    const latlng = marker.getLatLng();
+    mapInstanceRef.current.setView(latlng, Math.max(mapInstanceRef.current.getZoom(), 13), { animate: true });
+    // Defer popup so the pan animation settles first
+    setTimeout(() => marker.openPopup(), 450);
+  }, [focusSignal]);
 
   // Synchronized Event Highlight & Map Panning during Timeline Playback
   useEffect(() => {
@@ -503,7 +558,7 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
       .addTo(layer);
   }, [currentStepIndex, allEvents]);
 
-  // Playback Auto-Stepper
+  // Playback Auto-Stepper — Phase 7 Req30 human pacing (Slow 4s / Normal 2.5s / Fast 1.2s).
   useEffect(() => {
     let timer: any = null;
     if (isPlaying) {
@@ -515,13 +570,14 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
           }
           return prev + 1;
         });
-      }, 2000);
+      }, PLAYBACK_MS[playbackSpeed]);
     }
     return () => clearInterval(timer);
-  }, [isPlaying, allEvents.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, playbackSpeed, allEvents.length]);
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+    <div ref={viewRef} className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6 bg-slate-950">
       {/* Clean Header Bar without Clutter */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -571,6 +627,18 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
           >
             <Navigation className="w-3.5 h-3.5" />
             <span>Trajectories</span>
+          </button>
+
+          {/* Viewport expansion (Req31) */}
+          <button
+            onClick={toggleFullscreen}
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors border ${
+              isFullscreen ? "bg-amber-500/20 text-amber-300 border-amber-500/40" : "text-slate-400 hover:text-slate-200 border-transparent"
+            }`}
+            title={isFullscreen ? "Exit full screen" : "Expand map full screen"}
+          >
+            {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Expand className="w-3.5 h-3.5" />}
+            <span>{isFullscreen ? "Exit" : "Expand"}</span>
           </button>
 
           {/* Map Theme Switcher (100% Free Open Layers) */}
@@ -635,6 +703,21 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                 </button>
+                {/* Phase 7 Req30 — playback velocity */}
+                <div className="flex items-center gap-0.5 ml-1 bg-slate-950 border border-slate-800 rounded-lg p-0.5" title="Timeline playback speed">
+                  {(["slow", "normal", "fast"] as const).map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setPlaybackSpeed(s)}
+                      className={`px-1.5 py-1 rounded text-[10px] font-mono capitalize transition-colors ${
+                        playbackSpeed === s ? "bg-amber-500/20 text-amber-300 font-bold" : "text-slate-500 hover:text-slate-300"
+                      }`}
+                      title={s === "slow" ? "Slow · 4s per event" : s === "normal" ? "Normal · 2.5s per event" : "Fast · 1.2s per event"}
+                    >
+                      {s === "slow" ? "0.5×" : s === "normal" ? "1×" : "2×"}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 

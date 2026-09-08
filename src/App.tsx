@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   CaseDataset,
   CrimeNetworkNode,
@@ -14,6 +14,7 @@ import {
   EvidenceFileRecord,
   InvestigatorProfile,
   AuditLogEntry,
+  WorkstationTab,
 } from "./types";
 import {
   SAMPLE_CASES,
@@ -40,7 +41,6 @@ import { Sidebar } from "./components/Sidebar";
 import { Header } from "./components/Header";
 import { OverviewDashboard } from "./components/OverviewDashboard";
 import { GraphCanvas } from "./components/GraphCanvas";
-import { AnalyticsDashboard } from "./components/AnalyticsDashboard";
 import { PatternAlerts } from "./components/PatternAlerts";
 import { GeoTimelineView } from "./components/GeoTimelineView";
 import { DataIngestionHub } from "./components/DataIngestionHub";
@@ -48,47 +48,147 @@ import { InvestigatorRbacHub } from "./components/InvestigatorRbacHub";
 import { EntityDetailDrawer } from "./components/EntityDetailDrawer";
 import { RelationshipDetailDrawer } from "./components/RelationshipDetailDrawer";
 import { AddEvidenceModal } from "./components/AddEvidenceModal";
-import { AiCopilotDrawer } from "./components/AiCopilotDrawer";
+import { SahayakDrawer } from "./components/sahayak/SahayakDrawer";
 import { DossierModal } from "./components/DossierModal";
 import { CreateCaseModal } from "./components/CreateCaseModal";
-import { CaseArchiveManager, CaseArchivePayload } from "./components/CaseArchiveManager";
+import { CaseArchiveManager } from "./components/CaseArchiveManager";
 import { MobileBottomNav } from "./components/MobileBottomNav";
-import { Shield, Radio } from "lucide-react";
+import { Shield, Radio, Eye } from "lucide-react";
 import { VPNGatewayPage } from "./components/VPNGatewayPage";
+import { ProceedingsHub } from "./components/proceedings/ProceedingsHub";
+import { StagingHub } from "./components/staging/StagingHub";
+import { CyberHub } from "./components/cyber/CyberHub";
+import { stagingApi, caseApi } from "./services/api";
+import { dbEntityToNode, dbRelationshipToLink, mergeNodes, mergeLinks } from "./services/graphSync";
+import { AgencyDashboard } from "./components/departments/AgencyDashboard";
+import { departmentForUser, landingForRole } from "./services/roleRouting";
+import { isAdmin, isForensic, isField, isLead, isCyber, orgOf } from "./data/roles";
+import { matrixFor } from "./data/roleMatrices";
+import { SahayakPanel } from "./components/sahayak/SahayakPanel";
+import { applyDepartmentTheme } from "./services/theme";
+import { vpnApi } from "./services/vpn";
 
 function WorkstationApp() {
-  const { user, isAuthenticated, isLoading, logout, realtimeNotification, clearNotification } = useAuth();
+  const { user, isAuthenticated, isLoading, logout, realtimeNotification, clearNotification, refreshUser } = useAuth();
+
+  // Phase 0 — VPN gate mount: no workstation renders until the TLS tunnel exists.
+  const [vpnChecked, setVpnChecked] = useState(false);
+  const [vpnConnected, setVpnConnected] = useState(false);
+  const [showAgencyHome, setShowAgencyHome] = useState(true);
+
+  // Phase 2 — per-case access level, map focus signal, staging live-refresh
+  // (effects wired after currentCase is declared, below)
+  const [myAccess, setMyAccess] = useState<{ role: string; access: "FULL_EDIT" | "VIEW_ONLY" } | null>(null);
+  const [mapFocus, setMapFocus] = useState<{ nodeId: string; nonce: number } | null>(null);
+  const [stagingSignal, setStagingSignal] = useState(0);
+  const readOnly = myAccess?.access === "VIEW_ONLY";
+
+  useEffect(() => {
+    let cancelled = false;
+    vpnApi
+      .status()
+      .then((s) => {
+        if (!cancelled) {
+          setVpnConnected(!!s.connected);
+          setVpnChecked(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setVpnConnected(false);
+          setVpnChecked(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleVpnAuthenticated = async () => {
+    try {
+      const s = await vpnApi.status();
+      setVpnConnected(!!s.connected);
+    } catch {
+      setVpnConnected(true);
+    }
+    setShowAgencyHome(true);
+    await refreshUser().catch(() => undefined);
+  };
+
+  // Phase 1 Req2 — dynamic department theming: shell/nav follow the
+  // gov-ID-resolved agency palette for the signed-in officer.
+  useEffect(() => {
+    if (user) {
+      try {
+        applyDepartmentTheme(departmentForUser(user.role, user.agency || "", user.official_id || ""));
+      } catch {
+        applyDepartmentTheme(null);
+      }
+    } else {
+      applyDepartmentTheme(null);
+    }
+  }, [user]);
 
   // Case Datasets
   const [allCases, setAllCases] = useState<CaseDataset[]>(SAMPLE_CASES);
   const [currentCase, setCurrentCase] = useState<CaseDataset>(SAMPLE_CASES[0]);
   const [auditLogs, setAuditLogs] = useState(INITIAL_AUDIT_LOGS);
 
-  // VPN Gateway State
-  const [vpnConnected, setVpnConnected] = useState(false);
-  const [vpnConnecting, setVpnConnecting] = useState(false);
+  // Phase 2 — my access level for the active case (VIEW_ONLY after transfer)
+  useEffect(() => {
+    if (!user || !currentCase?.id) {
+      setMyAccess(null);
+      return;
+    }
+    let cancelled = false;
+    stagingApi
+      .getMyAccess(currentCase.id)
+      .then((a) => {
+        if (!cancelled) setMyAccess(a);
+      })
+      .catch(() => {
+        if (!cancelled) setMyAccess(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, currentCase?.id]);
 
-  const handleVpnConnect = () => {
-    // In real implementation, this would initiate the VPN connection
-    // For demo, we simulate connection
-    // The actual connection is handled by the VPNGatewayPage component
-  };
-
-  const handleVpnDisconnect = () => {
-    // Disconnect VPN
-  };
+  // Phase 2 — live pipeline sync: staging/transfer WS events refresh the hub;
+  // a transfer execution re-reads our own access level immediately.
+  // Phase 3 Req14 — CASE_CREATED / TEAM_UPDATED refresh the workspace list live.
+  // (Graph data merge lives in a later effect, after graph state is declared.)
+  useEffect(() => {
+    const evt = (realtimeNotification as unknown as { event_type?: string })?.event_type;
+    if (!evt) return;
+    if (evt === "CASE_CREATED" || evt === "TEAM_UPDATED" || evt === "POC_UPDATED") {
+      setWorkspaceSignal((s) => s + 1);
+      refreshUser().catch(() => undefined);
+    }
+    if (evt.startsWith("STAGING_") || evt.startsWith("TRANSFER_") || evt === "INGESTION_STAGED") {
+      setStagingSignal((s) => s + 1);
+    }
+    if (evt === "TRANSFER_EXECUTED" && currentCase?.id) {
+      stagingApi
+        .getMyAccess(currentCase.id)
+        .then((a) => setMyAccess(a))
+        .catch(() => undefined);
+      refreshUser().catch(() => undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realtimeNotification]);
 
   // Active Officer Profile derived from authenticated user
   const currentOfficer: InvestigatorProfile = useMemo(() => {
     if (!user) {
       return {
         id: "OFFICER-001",
-        name: "SP Vikramaditya Rathore, IPS",
-        rank: "Superintendent of Police",
-        badgeNumber: "NCB-SIT-774",
-        department: "Special Task Force & Intelligence",
-        agency: "Narcotics Control Bureau (NCB)",
-        role: "LEAD_INVESTIGATOR",
+        name: "SP Rohit Inamdar, IPS",
+        rank: "Superintendent of Police (Lead IO)",
+        badgeNumber: "CID-LEAD-310",
+        department: "Multi-District Investigations",
+        agency: "Crime Investigation Department (CID)",
+        role: "CID_LEAD",
         avatarColor: "#f59e0b",
         status: "ACTIVE",
         currentActivity: "Active Syndicate Interdiction",
@@ -111,15 +211,23 @@ function WorkstationApp() {
       department: user.department,
       agency: user.agency,
       role: user.role,
-      avatarColor: user.role === "ADMIN" ? "#6366f1" : user.role === "LEAD_INVESTIGATOR" ? "#f59e0b" : "#10b981",
+      avatarColor: String(user.role).endsWith("_ADMIN")
+        ? "#6366f1"
+        : String(user.role).endsWith("_LEAD")
+        ? "#f59e0b"
+        : String(user.role).endsWith("_CYBER")
+        ? "#06b6d4"
+        : String(user.role).endsWith("_FORENSIC")
+        ? "#10b981"
+        : "#3b82f6",
       status: "ACTIVE",
       currentActivity: "Active Syndicate Interdiction & Graph Reasoning",
       permissions: user.permissions || {
-        canSignDossier: user.role === "LEAD_INVESTIGATOR" || user.role === "ADMIN",
-        canConfirmEvidence: user.role === "LEAD_INVESTIGATOR" || user.role === "ADMIN",
-        canRejectEvidence: user.role === "LEAD_INVESTIGATOR" || user.role === "ADMIN",
-        canAddHypothesis: user.role === "LEAD_INVESTIGATOR" || user.role === "ADMIN",
-        canIngestData: true,
+        canSignDossier: String(user.role).endsWith("_LEAD") || String(user.role).endsWith("_ADMIN"),
+        canConfirmEvidence: String(user.role).endsWith("_LEAD") || String(user.role).endsWith("_ADMIN"),
+        canRejectEvidence: String(user.role).endsWith("_LEAD") || String(user.role).endsWith("_ADMIN"),
+        canAddHypothesis: String(user.role).endsWith("_LEAD") || String(user.role).endsWith("_ADMIN"),
+        canIngestData: !String(user.role).endsWith("_LEAD"),
         canExportData: true,
       },
     };
@@ -168,10 +276,39 @@ function WorkstationApp() {
   const [financials, setFinancials] = useState<FinancialRecord[]>(GARUDA_FINANCIALS);
   const [intels, setIntels] = useState<IntelRecord[]>(GARUDA_INTEL);
 
+  // Graph ↔ server sync: merge newly approved staging items into the canvas
+  // whenever the pipeline signal fires (idempotent, dedupes by id).
+  const graphSyncSeen = useRef(0);
+  useEffect(() => {
+    if (stagingSignal === 0 || !currentCase?.id) return;
+    if (graphSyncSeen.current === stagingSignal) return;
+    graphSyncSeen.current = stagingSignal;
+    const cid = currentCase.id;
+    caseApi
+      .getCaseState(cid)
+      .then((state) => {
+        setNodes((prev) => mergeNodes(prev, (state.nodes || []).map(dbEntityToNode)));
+        setLinks((prev) => mergeLinks(prev, (state.links || []).map(dbRelationshipToLink)));
+      })
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stagingSignal]);
+
   // Active View Tab: Defaults to 'overview' for the command dashboard experience
-  const [activeTab, setActiveTab] = useState<
-    "overview" | "graph" | "analytics" | "patterns" | "geo" | "ingest"
-  >("overview");
+  const [activeTab, setActiveTab] = useState<WorkstationTab>("overview");
+
+  // Changes.md portals — Lead: overview/graph/patterns/geo/sahayak/staging.
+  // Cyber: ingestion console + cyber cell only.
+  useEffect(() => {
+    if (!user) return;
+    if (isLead(user.role) && (activeTab === "ingest" || activeTab === "cyber" || activeTab === "proceedings")) {
+      setActiveTab("sahayak");
+    }
+    if (isCyber(user.role) && activeTab !== "ingest" && activeTab !== "cyber") {
+      setActiveTab("ingest");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, activeTab]);
 
   // Sidebar collapse toggle & Mobile drawer toggle
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -184,48 +321,21 @@ function WorkstationApp() {
   const [selectedPattern, setSelectedPattern] = useState<SuspiciousPattern | null>(null);
 
   // Drawers & Modals
-  const [isCopilotOpen, setIsCopilotOpen] = useState(false);
+  const [isSahayakOpen, setIsSahayakOpen] = useState(false);
   const [isDossierOpen, setIsDossierOpen] = useState(false);
   const [isCreateCaseOpen, setIsCreateCaseOpen] = useState(false);
   const [isAddEvidenceOpen, setIsAddEvidenceOpen] = useState(false);
   const [isArchiveOpen, setIsArchiveOpen] = useState(false);
-  const [isCasesViewOpen, setIsCasesViewOpen] = useState(false);
+  // Phase 3 Req13 — My Workspace is the default entry point after authentication.
+  const [isCasesViewOpen, setIsCasesViewOpen] = useState(true);
+  // Phase 3 Req14 — bumped on CASE_CREATED so the workspace list refreshes live.
+  const [workspaceSignal, setWorkspaceSignal] = useState(0);
 
-  // Import Archive Handler
-  const handleImportCaseArchive = (payload: CaseArchivePayload) => {
-    const importedCase = payload.caseMetadata;
-    setAllCases((prev) => {
-      const exists = prev.find((c) => c.id === importedCase.id);
-      if (exists) {
-        return prev.map((c) => (c.id === importedCase.id ? importedCase : c));
-      }
-      return [importedCase, ...prev];
-    });
-
-    setCaseDataMap((prev) => ({
-      ...prev,
-      [importedCase.id]: {
-        nodes: payload.graphData.nodes,
-        links: payload.graphData.links,
-        firs: payload.evidenceRecords.firs || [],
-        cdrs: payload.evidenceRecords.cdrs || [],
-        financials: payload.evidenceRecords.financials || [],
-        intels: payload.evidenceRecords.intels || [],
-        evidenceFiles: payload.evidenceRecords.evidenceFiles || importedCase.evidenceFiles,
-      },
-    }));
-
-    setCurrentCase(importedCase);
-    setNodes(payload.graphData.nodes);
-    setLinks(payload.graphData.links);
-    setFirs(payload.evidenceRecords.firs || []);
-    setCdrs(payload.evidenceRecords.cdrs || []);
-    setFinancials(payload.evidenceRecords.financials || []);
-    setIntels(payload.evidenceRecords.intels || []);
-
-    if (payload.auditLogs && payload.auditLogs.length > 0) {
-      setAuditLogs((prev) => [...payload.auditLogs, ...prev]);
-    }
+  // Phase 8 Req32 — import is server-side (POST /api/cases/import); the
+  // manager calls the API itself, then we refresh auth + workspace.
+  const handleImportCaseArchive = async () => {
+    setWorkspaceSignal((s) => s + 1);
+    await refreshUser().catch(() => undefined);
   };
 
   // Save current case state to caseDataMap whenever nodes/links change
@@ -284,44 +394,12 @@ function WorkstationApp() {
     }
   };
 
-  // Handle registering and populating a brand-new case
-  const handleCreateCase = (
-    newCase: CaseDataset,
-    initialNodes: CrimeNetworkNode[],
-    initialLinks: CrimeNetworkLink[]
-  ) => {
-    setAllCases((prev) => [newCase, ...prev]);
-
-    setCaseDataMap((prev) => ({
-      ...prev,
-      [newCase.id]: {
-        nodes: initialNodes,
-        links: initialLinks,
-        firs: [],
-        cdrs: [],
-        financials: [],
-        intels: [],
-        evidenceFiles: newCase.evidenceFiles || [],
-      },
-    }));
-
-    setCurrentCase(newCase);
-    setNodes(initialNodes);
-    setLinks(initialLinks);
-    setFirs([]);
-    setCdrs([]);
-    setFinancials([]);
-    setIntels([]);
-    setSelectedNode(null);
-    setSelectedLink(null);
-    setShortestPath(null);
-    setSelectedPattern(null);
-
-    if (initialNodes.length > 0) {
-      setActiveTab("graph");
-    } else {
-      setActiveTab("overview");
-    }
+  // Phase 3 Req14/16 — cases originate server-side (ADMIN-only POST /api/cases).
+  // The modal calls the API itself; this refreshes auth + workspace on success.
+  const handleCreateCase = async () => {
+    setIsCreateCaseOpen(false);
+    setWorkspaceSignal((s) => s + 1);
+    await refreshUser().catch(() => undefined);
   };
 
   // Run Graph Analytics Engine (Centrality, Communities, Cut-Vertices, Patterns)
@@ -619,39 +697,63 @@ function WorkstationApp() {
           <Shield className="w-6 h-6 animate-pulse" />
         </div>
         <div className="text-center">
-          <h2 className="text-sm font-bold tracking-tight text-slate-100 font-mono">CRIM-INTEL OS v4.2</h2>
+          <h2 className="text-sm font-bold tracking-tight text-slate-100 font-mono">TRINETRA OS</h2>
           <p className="text-xs text-slate-400 font-mono mt-1">Initializing Air-Gapped Unified Vault & Security Clearance...</p>
         </div>
       </div>
     );
   }
 
+  // Phase 0 — VPN gate mounts before anything else (demo or production gateway).
+  if (!vpnChecked) {
+    return (
+      <div className="h-screen w-screen bg-slate-950 flex flex-col items-center justify-center text-slate-100 space-y-4">
+        <div className="w-12 h-12 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
+          <Shield className="w-6 h-6 animate-pulse" />
+        </div>
+        <p className="text-xs text-slate-400 font-mono">Probing VPN gateway…</p>
+      </div>
+    );
+  }
+
+  if (!vpnConnected) {
+    return <VPNGatewayPage onAuthenticated={handleVpnAuthenticated} />;
+  }
+
   if (!isAuthenticated || !user) {
     return <LoginView />;
   }
 
-  // 1. Role = ADMIN -> Render Admin Portal
-  if (user.role === "ADMIN") {
-    return <AdminPortal />;
+  // Phase 0 — canonical LEAD/CYBER roles land on their department dashboard first
+  // (branding resolved from gov-ID prefix via departmentForUser).
+  if (showAgencyHome && landingForRole(user.role) === "agency") {
+    const department = departmentForUser(user.role, user.agency || "", user.official_id || "");
+    return (
+      <AgencyDashboard
+        department={department}
+        user={user}
+        stats={{
+          cases: allCases.length,
+          nodes: analyzedNodes.length,
+          links: links.length,
+          patterns: detectedPatterns.length,
+        }}
+        graph={{ nodes: analyzedNodes, links, intels }}
+        onEnterWorkstation={() => setShowAgencyHome(false)}
+        onLogout={logout}
+      />
+    );
   }
 
-  // 2. Role = FORENSIC_INVESTIGATOR -> Render Forensic Lab Portal
-  if (user.role === "FORENSIC_INVESTIGATOR") {
-    return <ForensicPortal />;
-  }
-
-  // 3. Role = INVESTIGATOR / INSPECTOR -> Render Field Investigator Portal
-  if (user.role === "INVESTIGATOR" || (user.role as string) === "INSPECTOR") {
-    return <InvestigatorPortal />;
-  }
-
-  // 3. User requested to switch/browse case workspaces
+  // Phase 3 Req13 — My Workspace is the default entry for ALL roles.
+  // Role portals render only after a case is picked (or the view is closed).
   if (isCasesViewOpen) {
     return (
       <>
         <MyCasesView
           allSystemCases={allCases}
           activeCaseId={currentCase?.id}
+          refreshSignal={workspaceSignal}
           onCreateNewCase={() => setIsCreateCaseOpen(true)}
           onClose={() => setIsCasesViewOpen(false)}
           onSelectCase={(selectedCase) => {
@@ -659,7 +761,7 @@ function WorkstationApp() {
             setIsCasesViewOpen(false);
           }}
         />
-        {/* Register / Create New Case Modal inside Workspaces View */}
+        {/* Register / Create New Case Modal inside Workspaces View (ADMIN-only server-side) */}
         <CreateCaseModal
           isOpen={isCreateCaseOpen}
           onClose={() => setIsCreateCaseOpen(false)}
@@ -669,6 +771,24 @@ function WorkstationApp() {
       </>
     );
   }
+
+  // 1. Role = *_ADMIN (CBI_ADMIN/NIA_ADMIN/CID_ADMIN/POLICE_ADMIN) -> Admin Portal (dept-scoped server-side)
+  if (isAdmin(user.role)) {
+    return <AdminPortal />;
+  }
+
+  // 2. Role = *_FORENSIC -> Forensic Lab Portal
+  if (isForensic(user.role)) {
+    return <ForensicPortal />;
+  }
+
+  // 3. Role = *_FIELD (CBI_FIELD/NIA_FIELD/CID_FIELD/POLICE_FIELD) -> Field Investigator Portal
+  if (isField(user.role)) {
+    return <InvestigatorPortal />;
+  }
+
+  // 3b. LEAD/CYBER roles fall through to the full workstation below after
+  // their department dashboard (handled above).
 
   // 4. Role = LEAD_INVESTIGATOR -> Full Crime Intelligence Graph Workstation
   return (
@@ -704,12 +824,13 @@ function WorkstationApp() {
         onSelectCase={handleSelectCase}
         activeTab={activeTab}
         onTabChange={setActiveTab}
-        onOpenCopilot={() => setIsCopilotOpen(true)}
+        onOpenCopilot={() => setIsSahayakOpen(true)}
         onOpenDossier={() => setIsDossierOpen(true)}
         onOpenNewCase={() => setIsCreateCaseOpen(true)}
         onOpenArchive={() => setIsArchiveOpen(true)}
         onOpenMyCases={() => setIsCasesViewOpen(true)}
         onLogout={logout}
+        userRole={user?.role}
         nodeCount={analyzedNodes.length}
         kingpinCount={analyzedNodes.filter((n) => n.isKingpinCandidate).length}
         cutVertexCount={cutVertices.length}
@@ -730,7 +851,7 @@ function WorkstationApp() {
           activeTab={activeTab}
           onTabChange={setActiveTab}
           onOpenDossier={() => setIsDossierOpen(true)}
-          onOpenCopilot={() => setIsCopilotOpen(true)}
+          onOpenCopilot={() => setIsSahayakOpen(true)}
           onOpenNewCase={() => setIsCreateCaseOpen(true)}
           onOpenArchive={() => setIsArchiveOpen(true)}
           onOpenMyCases={() => setIsCasesViewOpen(true)}
@@ -745,6 +866,16 @@ function WorkstationApp() {
           onLogout={logout}
         />
 
+        {/* Phase 2 — VIEW_ONLY banner after inter-department transfer */}
+        {readOnly && (
+          <div className="px-4 sm:px-6 py-2 bg-cyan-500/10 border-b border-cyan-500/30 text-[11px] font-mono text-cyan-200 flex items-center gap-2">
+            <Eye className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              VIEW_ONLY access — this case was transferred to another department. You can inspect the graph, map, diary and pipeline, but mutations are disabled (403).
+            </span>
+          </div>
+        )}
+
         {/* Dynamic Workspace Container */}
         <main className="flex-1 overflow-y-auto relative flex flex-col pb-16 md:pb-0">
           {/* Module 0: Executive Command Overview Dashboard */}
@@ -754,15 +885,7 @@ function WorkstationApp() {
               nodes={analyzedNodes}
               links={links}
               patterns={detectedPatterns}
-              communities={communities}
-              cutVertices={cutVertices}
               onSelectNode={handleSelectNodeAndFocus}
-              onSelectPattern={handleSelectPatternAndFocus}
-              onNavigateTab={setActiveTab}
-              onOpenCopilot={() => setIsCopilotOpen(true)}
-              onOpenDossier={() => setIsDossierOpen(true)}
-              onOpenNewCase={() => setIsCreateCaseOpen(true)}
-              onOpenArchive={() => setIsArchiveOpen(true)}
             />
           )}
 
@@ -781,36 +904,24 @@ function WorkstationApp() {
             />
           )}
 
-          {/* Module 2: Centrality, Influencers & Disruption Engine */}
-          {activeTab === "analytics" && (
-            <AnalyticsDashboard
-              nodes={analyzedNodes}
-              links={links}
-              communities={communities}
-              cutVertices={cutVertices}
-              patterns={detectedPatterns}
-              caseId={currentCase.id}
-              auditLogs={auditLogs}
-              onRecordAction={handleRecordPlaybookAction}
-              onSelectNode={(node) => {
-                setSelectedNode(node);
-                setActiveTab("graph");
-              }}
-              onSetShortestPath={setShortestPath}
-              onSwitchToGraph={() => setActiveTab("graph")}
-            />
-          )}
-
-          {/* Module 3: Suspicious Pattern Alert Center */}
+          {/* Module 3: Threat Patterns & Leads (alerts + path finder + playbook) */}
           {activeTab === "patterns" && (
             <PatternAlerts
               patterns={detectedPatterns}
               nodes={analyzedNodes}
+              links={links}
+              communities={communities}
+              cutVertices={cutVertices}
+              caseId={currentCase.id}
+              auditLogs={auditLogs}
               onSelectPattern={setSelectedPattern}
               onFocusNode={(node) => {
                 setSelectedNode(node);
                 setActiveTab("graph");
               }}
+              onSelectNode={handleSelectNodeAndFocus}
+              onSetShortestPath={setShortestPath}
+              onRecordAction={handleRecordPlaybookAction}
               onSwitchToGraph={() => setActiveTab("graph")}
             />
           )}
@@ -824,19 +935,48 @@ function WorkstationApp() {
               cdrs={cdrs}
               financials={financials}
               intels={intels}
+              focusSignal={mapFocus}
               onSelectNode={(node) => {
+                // Phase 2 map → graph sync: select opens the drawer in place;
+                // "View in Graph" jumps explicitly. Map stays put.
                 setSelectedNode(node);
-                setActiveTab("graph");
               }}
             />
           )}
 
-          {/* Module 5: Multi-Source Data Ingestion Hub (Supports 15GB files) */}
-          {activeTab === "ingest" && (
+          {/* Module 5: Multi-Source Data Ingestion Hub (Cyber Personnel only — Req18) */}
+          {activeTab === "ingest" && user && !isLead(user.role) && (
             <DataIngestionHub
               onIngestExtractedData={handleIngestExtractedData}
               onSwitchToGraph={() => setActiveTab("graph")}
               onOpenAddEvidence={() => setIsAddEvidenceOpen(true)}
+            />
+          )}
+
+          {/* Module 5b: SAHAYAK AI replaces ingestion for Lead Investigators (Req19) */}
+          {activeTab === "sahayak" && (
+            <SahayakPanel caseId={currentCase.id} readOnly={readOnly} onChanged={() => setStagingSignal((s) => s + 1)} />
+          )}
+
+          {/* Module 6 retired from role portals per Changes.md (diary spine still auto-logs server-side) */}
+
+          {/* Module 7: Intake & Approval Pipeline (Staging · Pool · Transfer) */}
+          {activeTab === "staging" && (
+            <StagingHub currentCase={currentCase} readOnly={readOnly} signal={stagingSignal} />
+          )}
+
+          {/* Module 8: Cyber Crime Cell (Cyber Personnel only — Req18) */}
+          {activeTab === "cyber" && user && !isLead(user.role) && (
+            <CyberHub
+              caseId={currentCase.id}
+              readOnly={readOnly}
+              signal={stagingSignal}
+              onChanged={() => setStagingSignal((s) => s + 1)}
+              focusLine={
+                user
+                  ? `${matrixFor(orgOf(user.role)).cyber.title}: ${matrixFor(orgOf(user.role)).cyber.focus.join(" · ")}`
+                  : undefined
+              }
             />
           )}
         </main>
@@ -846,9 +986,13 @@ function WorkstationApp() {
       <MobileBottomNav
         activeTab={activeTab}
         onTabChange={setActiveTab}
+        nodeCount={analyzedNodes.length}
+        patternCount={detectedPatterns.length}
         onOpenNewCase={() => setIsCreateCaseOpen(true)}
-        onOpenCopilot={() => setIsCopilotOpen(true)}
+        onOpenMobileMenu={() => setIsMobileMenuOpen(true)}
+        onOpenCopilot={() => setIsSahayakOpen(true)}
         onOpenDossier={() => setIsDossierOpen(true)}
+        userRole={user?.role}
       />
 
       {/* 4. Register / Create New Case Modal */}
@@ -879,6 +1023,11 @@ function WorkstationApp() {
           onUpdateReviewState={handleUpdateNodeReviewState}
           onAddNote={handleAddNodeNote}
           onSelectLink={(link) => setSelectedLink(link)}
+          onLocateOnMap={(node) => {
+            setMapFocus({ nodeId: node.id, nonce: Date.now() });
+            setActiveTab("geo");
+          }}
+          onViewInGraph={() => setActiveTab("graph")}
         />
       )}
 
@@ -894,16 +1043,18 @@ function WorkstationApp() {
         />
       )}
 
-      {/* 8. AI Criminal Graph Copilot */}
-      <AiCopilotDrawer
-        isOpen={isCopilotOpen}
-        onClose={() => setIsCopilotOpen(false)}
+      {/* 8. SAHAYAK — Ask · Document Intel · Evidence Links · Statutes */}
+      <SahayakDrawer
+        isOpen={isSahayakOpen}
+        onClose={() => setIsSahayakOpen(false)}
         caseId={currentCase?.id || "case-garuda"}
         nodes={analyzedNodes}
         links={links}
         patterns={detectedPatterns}
         communities={communities}
         onSelectNode={(node) => setSelectedNode(node)}
+        readOnly={readOnly}
+        onChanged={() => setStagingSignal((s) => s + 1)}
       />
 
       {/* 9. Court-Ready Case Intelligence Dossier */}

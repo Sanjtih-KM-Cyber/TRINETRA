@@ -48,9 +48,17 @@ export interface ExtractionSchema {
 }
 
 function getEnv(key: string): string | undefined {
-  // Vite exposes env vars on import.meta.env
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (import.meta as any).env?.[key];
+  // Browser (Vite): import.meta.env. Server bundle (CJS): process.env.
+  try {
+    const viteEnv = (import.meta as unknown as { env?: Record<string, string> })?.env?.[key];
+    if (viteEnv !== undefined) return viteEnv;
+  } catch {
+    /* import.meta unavailable (bundled CJS server) — fall through */
+  }
+  if (typeof process !== "undefined") {
+    return process.env?.[key];
+  }
+  return undefined;
 }
 
 function getLLMConfig(): LLMConfig {
@@ -90,8 +98,8 @@ function createTimeoutController(timeoutMs: number): AbortController {
   return controller;
 }
 
-async function callOllamaOrGroq(config: LLMConfig, messages: ChatMessage[]): Promise<string> {
-  const controller = createTimeoutController(config.timeoutMs);
+async function callOllamaOrGroq(config: LLMConfig, messages: ChatMessage[], timeoutMs?: number): Promise<string> {
+  const controller = createTimeoutController(timeoutMs ?? config.timeoutMs);
   
   const payload = {
     model: config.model,
@@ -125,8 +133,8 @@ async function callOllamaOrGroq(config: LLMConfig, messages: ChatMessage[]): Pro
   return data.choices?.[0]?.message?.content || "";
 }
 
-async function callGemini(config: LLMConfig, messages: ChatMessage[]): Promise<string> {
-  const controller = createTimeoutController(config.timeoutMs);
+async function callGemini(config: LLMConfig, messages: ChatMessage[], timeoutMs?: number): Promise<string> {
+  const controller = createTimeoutController(timeoutMs ?? config.timeoutMs);
   
   const systemPrompt = messages.find(m => m.role === "system")?.content || "";
   const userMessages = messages.filter(m => m.role !== "system");
@@ -163,20 +171,21 @@ async function callGemini(config: LLMConfig, messages: ChatMessage[]): Promise<s
   return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }
 
-export async function callLLM(messages: ChatMessage[]): Promise<LLMResponse> {
+export async function callLLM(messages: ChatMessage[], timeoutMs?: number): Promise<LLMResponse> {
   const config = getLLMConfig();
-  
+  const effectiveTimeout = timeoutMs ?? config.timeoutMs;
+
   let content: string;
-  
+
   try {
     if (config.provider === "gemini") {
-      content = await callGemini(config, messages);
+      content = await callGemini(config, messages, effectiveTimeout);
     } else {
-      content = await callOllamaOrGroq(config, messages);
+      content = await callOllamaOrGroq(config, messages, effectiveTimeout);
     }
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`LLM request timed out after ${config.timeoutMs}ms`);
+      throw new Error(`LLM request timed out after ${effectiveTimeout}ms`);
     }
     throw error;
   }

@@ -1,5 +1,15 @@
 import React, { useState } from "react";
-import { SuspiciousPattern, CrimeNetworkNode } from "../types";
+import {
+  SuspiciousPattern,
+  CrimeNetworkNode,
+  CrimeNetworkLink,
+  SyndicateCommunity,
+  ShortestPathResult,
+  AuditLogEntry,
+} from "../types";
+import { PathFinder } from "./PathFinder";
+import { InvestigativePlaybook } from "./InvestigativePlaybook";
+import { InvestigativeStep } from "../services/actionableIntelEngine";
 import {
   Flame,
   ShieldAlert,
@@ -18,16 +28,32 @@ import {
 interface PatternAlertsProps {
   patterns: SuspiciousPattern[];
   nodes: CrimeNetworkNode[];
+  links: CrimeNetworkLink[];
+  communities: SyndicateCommunity[];
+  cutVertices: string[];
+  caseId: string;
+  auditLogs: AuditLogEntry[];
   onSelectPattern: (pattern: SuspiciousPattern) => void;
   onFocusNode: (node: CrimeNetworkNode) => void;
+  onSelectNode: (node: CrimeNetworkNode) => void;
+  onSetShortestPath: (path: ShortestPathResult | null) => void;
+  onRecordAction: (step: InvestigativeStep) => void;
   onSwitchToGraph: () => void;
 }
 
 export const PatternAlerts: React.FC<PatternAlertsProps> = ({
   patterns,
   nodes,
+  links,
+  communities,
+  cutVertices,
+  caseId,
+  auditLogs,
   onSelectPattern,
   onFocusNode,
+  onSelectNode,
+  onSetShortestPath,
+  onRecordAction,
   onSwitchToGraph,
 }) => {
   const [severityFilter, setSeverityFilter] = useState<"ALL" | "CRITICAL" | "HIGH" | "MEDIUM">("ALL");
@@ -218,6 +244,27 @@ export const PatternAlerts: React.FC<PatternAlertsProps> = ({
           </div>
         ))}
       </div>
+
+      {/* Intermediary Link & Money Mule Path Finder */}
+      <PathFinder
+        nodes={nodes}
+        links={links}
+        onSelectNode={onSelectNode}
+        onSetShortestPath={onSetShortestPath}
+        onSwitchToGraph={onSwitchToGraph}
+      />
+
+      {/* Investigative Playbook — prioritized legal directives */}
+      <InvestigativePlaybook
+        caseId={caseId}
+        nodes={nodes}
+        links={links}
+        patterns={patterns}
+        communities={communities}
+        cutVertices={cutVertices}
+        auditLogs={auditLogs}
+        onRecordAction={onRecordAction}
+      />
     </div>
   );
 };

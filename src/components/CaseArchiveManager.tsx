@@ -1,26 +1,14 @@
-import React, { useRef, useState, useEffect } from "react";
+import React, { useRef, useState } from "react";
 import {
   Download,
   Upload,
   FolderArchive,
   CheckCircle2,
   AlertCircle,
-  FileJson,
-  Database,
-  Lock,
-  HardDrive,
   ShieldCheck,
   X,
-  FileText,
-  List,
-  Hash,
-  Clock,
-  User,
-  AlertTriangle,
-  CheckCircle,
-  XCircle,
-  HelpCircle,
 } from "lucide-react";
+import { caseApi } from "../services/api";
 import {
   CaseDataset,
   CrimeNetworkNode,
@@ -62,7 +50,8 @@ interface CaseArchiveManagerProps {
   financials: FinancialRecord[];
   intels: IntelRecord[];
   auditLogs: AuditLogEntry[];
-  onImportArchive: (payload: CaseArchivePayload) => void;
+  /** Phase 8 Req32 — fired after the server initializes the imported case. */
+  onImportArchive: () => void;
   isOpen: boolean;
   onClose: () => void;
 }
@@ -82,25 +71,12 @@ export const CaseArchiveManager: React.FC<CaseArchiveManagerProps> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [importStatus, setImportStatus] = useState<{
     success?: boolean;
     message?: string;
     caseName?: string;
   } | null>(null);
-
-  // Audit Log Streaming State
-  const [auditLogsStream, setAuditLogsStream] = useState<AuditLogEntry[]>(auditLogs);
-  const [auditFilter, setAuditFilter] = useState<"all" | "review" | "ingestion" | "notes" | "access">("all");
-
-  // Filter audit logs based on selected filter
-  const filteredAuditLogs = auditLogsStream.filter((log) => {
-    if (auditFilter === "all") return true;
-    if (auditFilter === "review") return log.actionType === "EVIDENCE_REVIEW" || log.action?.includes("REVIEW");
-    if (auditFilter === "ingestion") return log.action?.includes("INGEST") || log.action?.includes("EVIDENCE_COMMITTED") || log.action?.includes("EVIDENCE_VALIDATED");
-    if (auditFilter === "notes") return log.action?.includes("NOTE") || log.action?.includes("HYPOTHESIS");
-    if (auditFilter === "access") return log.action?.includes("ACCESS") || log.action?.includes("CASE_ACCESS");
-    return true;
-  });
 
   if (!isOpen) return null;
 
@@ -138,28 +114,48 @@ export const CaseArchiveManager: React.FC<CaseArchiveManagerProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  // Phase 8 Req32 — repaired import: validates the container, then initializes
+  // a NEW server-side case via POST /api/cases/import (ADMIN-only).
   const processJsonFile = (file: File) => {
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const content = event.target?.result as string;
         const parsed: CaseArchivePayload = JSON.parse(content);
 
-        if (!parsed.caseMetadata || !parsed.graphData || !parsed.graphData.nodes) {
-          throw new Error("Invalid archive schema: Missing essential caseMetadata or graphData.nodes.");
+        if (!parsed.caseMetadata?.name || !parsed.caseMetadata?.codeName || !Array.isArray(parsed.graphData?.nodes)) {
+          throw new Error("Invalid archive schema: need caseMetadata {name, codeName} and graphData.nodes[].");
         }
 
-        onImportArchive(parsed);
+        setIsImporting(true);
+        setImportStatus(null);
+        const res = await caseApi.importArchive({
+          caseMetadata: parsed.caseMetadata,
+          graphData: { nodes: parsed.graphData.nodes, links: parsed.graphData.links || [] },
+          evidenceRecords: {
+            firs: parsed.evidenceRecords?.firs || [],
+            cdrs: parsed.evidenceRecords?.cdrs || [],
+            financials: parsed.evidenceRecords?.financials || [],
+            intels: parsed.evidenceRecords?.intels || [],
+            evidenceFiles: parsed.evidenceRecords?.evidenceFiles || [],
+          },
+          auditLogs: parsed.auditLogs || [],
+          version: parsed.version,
+        });
+        const c = res.imported;
         setImportStatus({
           success: true,
-          caseName: parsed.caseMetadata.name,
-          message: `Successfully loaded Case "${parsed.caseMetadata.name}" (${parsed.graphData.nodes.length} entities, ${parsed.graphData.links.length} relations, ${(parsed.evidenceRecords.firs || []).length} FIRs, ${(parsed.evidenceRecords.cdrs || []).length} CDR records).`,
+          caseName: res.case.codeName,
+          message: `Case "${res.case.codeName}" initialized on the server (${c.nodes} entities, ${c.links} relations, ${c.firs} FIRs, ${c.cdrs} CDR, ${c.evidenceFiles} exhibits). It appears in My Workspace in real time.`,
         });
+        onImportArchive();
       } catch (err: any) {
         setImportStatus({
           success: false,
-          message: err.message || "Failed to parse case archive file. Ensure valid JSON.",
+          message: err.message || "Import failed. Only Department Admins may initialize cases from archives.",
         });
+      } finally {
+        setIsImporting(false);
       }
     };
     reader.readAsText(file);
@@ -291,11 +287,15 @@ export const CaseArchiveManager: React.FC<CaseArchiveManagerProps> = ({
 
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="w-full py-2.5 px-3 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-xl flex items-center justify-center gap-2 transition-colors shadow-lg shadow-cyan-600/20 active:scale-95"
+                disabled={isImporting}
+                className="w-full py-2.5 px-3 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-xl flex items-center justify-center gap-2 transition-colors shadow-lg shadow-cyan-600/20 active:scale-95 disabled:opacity-50"
               >
                 <Upload className="w-4 h-4" />
-                <span>Load File (.json)</span>
+                <span>{isImporting ? "Initializing case…" : "Load File (.json)"}</span>
               </button>
+              <p className="text-[10px] font-mono text-slate-500">
+                ADMIN-only: initializes a new server-side case. Appears in My Workspace in real time.
+              </p>
             </div>
           </div>
 
@@ -326,111 +326,6 @@ export const CaseArchiveManager: React.FC<CaseArchiveManagerProps> = ({
               )}
             </div>
           )}
-
-          {/* Immutable Audit Ledger Stream */}
-          <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-slate-200 font-bold">
-                <List className="w-4 h-4 text-amber-400" />
-                <span>Immutable Audit Ledger Stream</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <select
-                  value={auditFilter}
-                  onChange={(e) => setAuditFilter(e.target.value as any)}
-                  className="bg-slate-900 border border-slate-700 text-slate-200 text-[10px] font-mono rounded-lg px-2 py-1 focus:ring-1 focus:ring-amber-500 focus:outline-none"
-                >
-                  <option value="all">All Events</option>
-                  <option value="review">Review Decisions</option>
-                  <option value="ingestion">Evidence Ingestion</option>
-                  <option value="notes">Notes & Hypotheses</option>
-                  <option value="access">Access Control</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
-              {filteredAuditLogs.length === 0 ? (
-                <div className="p-4 text-center text-slate-500 text-[11px]">
-                  No audit events match the current filter.
-                </div>
-              ) : (
-                filteredAuditLogs.slice(0, 50).map((log, idx) => {
-                  const isReview = log.actionType === "EVIDENCE_REVIEW" || log.action?.includes("REVIEW");
-                  const isIngestion = log.action?.includes("INGEST") || log.action?.includes("EVIDENCE_COMMITTED") || log.action?.includes("EVIDENCE_VALIDATED");
-                  const isNotes = log.action?.includes("NOTE") || log.action?.includes("HYPOTHESIS");
-                  const isAccess = log.action?.includes("ACCESS") || log.action?.includes("CASE_ACCESS");
-
-                  const getActionIcon = () => {
-                    if (isReview) return <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />;
-                    if (isIngestion) return <Database className="w-3.5 h-3.5 text-cyan-400" />;
-                    if (isNotes) return <FileText className="w-3.5 h-3.5 text-amber-400" />;
-                    if (isAccess) return <Lock className="w-3.5 h-3.5 text-indigo-400" />;
-                    return <AlertTriangle className="w-3.5 h-3.5 text-slate-400" />;
-                  };
-
-                  const getTargetBadge = () => {
-                    if (log.target_type === "NODE") return <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">NODE</span>;
-                    if (log.target_type === "LINK") return <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">LINK</span>;
-                    if (log.target_type === "EXHIBIT") return <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">EVIDENCE</span>;
-                    return <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-700 text-slate-300">{log.target_type || "SYSTEM"}</span>;
-                  };
-
-                  return (
-                    <div
-                      key={idx}
-                      className="p-3 bg-slate-900/90 border border-slate-800 rounded-lg space-y-1.5 hover:border-amber-500/30 transition-colors"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-center gap-2 flex-1 min-w-0">
-                          <div className="p-1.5 bg-slate-800 rounded-lg border border-slate-700 shrink-0">
-                            {getActionIcon()}
-                          </div>
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="font-semibold text-slate-100 truncate">{log.user_name || "System"}</span>
-                              <span className="text-[9px] font-mono text-slate-400 shrink-0">{log.user_role || ""}</span>
-                              {getTargetBadge()}
-                              {log.target_label && (
-                                <span className="text-[10px] font-mono text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20 truncate shrink-0">
-                                  {log.target_label}
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[10px] text-slate-400 mt-0.5">{log.details}</div>
-                          </div>
-                        </div>
-                        <div className="flex flex-col items-end gap-0.5 shrink-0 text-right">
-                          <span className="text-[9px] font-mono text-slate-400">{new Date(log.timestamp).toLocaleString()}</span>
-                          <span className="text-[8px] font-mono text-slate-500">{log.digital_hash?.slice(0, 16)}...</span>
-                        </div>
-                      </div>
-                      {log.metadata && (
-                        <details className="group">
-                          <summary className="text-[9px] text-slate-500 cursor-pointer hover:text-slate-300 flex items-center gap-1">
-                            <Hash className="w-3 h-3" />
-                            <span>View Digital Signature & Metadata</span>
-                          </summary>
-                          <div className="mt-2 p-2 bg-slate-950 border border-slate-800 rounded text-[9px] font-mono text-slate-300 space-y-0.5">
-                            <div><strong>Hash:</strong> {log.digital_hash}</div>
-                            {log.metadata.previousState && <div><strong>Previous State:</strong> {log.metadata.previousState}</div>}
-                            {log.metadata.newState && <div><strong>New State:</strong> {log.metadata.newState}</div>}
-                            {log.metadata.note && <div><strong>Note:</strong> {log.metadata.note}</div>}
-                          </div>
-                        </details>
-                      )}
-                    </div>
-                  );
-                })
-              )}
-            </div>
-
-            {filteredAuditLogs.length > 50 && (
-              <div className="text-center text-[10px] text-slate-500 pt-2 border-t border-slate-800/80">
-                Showing 50 of {filteredAuditLogs.length} events. Export full audit log for complete chain of custody.
-              </div>
-            )}
-          </div>
 
           {/* Security & Verification Footer */}
           <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between text-[10px] text-slate-500 font-mono">

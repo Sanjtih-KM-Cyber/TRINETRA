@@ -2,64 +2,83 @@ import React from "react";
 import {
   LayoutDashboard,
   Network,
-  Layers,
   AlertTriangle,
   Database,
   PlusCircle,
   Menu,
+  Sparkles,
+  Radar,
 } from "lucide-react";
+import { WorkstationTab } from "../types";
+import { isLead, isCyber } from "../data/roles";
 
 interface MobileBottomNavProps {
-  activeTab: "overview" | "graph" | "analytics" | "patterns" | "geo" | "ingest";
-  onTabChange: (tab: "overview" | "graph" | "analytics" | "patterns" | "geo" | "ingest") => void;
-  nodeCount: number;
-  patternCount: number;
+  activeTab: WorkstationTab;
+  onTabChange: (tab: WorkstationTab) => void;
+  nodeCount?: number;
+  patternCount?: number;
   onOpenNewCase: () => void;
-  onOpenMobileMenu: () => void;
+  onOpenMobileMenu?: () => void;
+  onOpenCopilot?: () => void;
+  onOpenDossier?: () => void;
+  /** Phase 4 Req19 — Lead sees SAHAYAK instead of Ingest. */
+  userRole?: string;
 }
 
 export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   activeTab,
   onTabChange,
-  nodeCount,
-  patternCount,
+  nodeCount = 0,
+  patternCount = 0,
   onOpenNewCase,
   onOpenMobileMenu,
+  userRole,
 }) => {
-  const tabs = [
-    {
-      id: "overview" as const,
-      label: "Overview",
-      icon: LayoutDashboard,
-      badge: null,
-    },
-    {
-      id: "graph" as const,
-      label: "Graph",
-      icon: Network,
-      badge: nodeCount > 0 ? `${nodeCount}` : null,
-      badgeColor: "bg-slate-800 text-slate-300",
-    },
-    {
-      id: "analytics" as const,
-      label: "Centrality",
-      icon: Layers,
-      badge: null,
-    },
-    {
-      id: "patterns" as const,
-      label: "Alerts",
-      icon: AlertTriangle,
-      badge: patternCount > 0 ? `${patternCount}` : null,
-      badgeColor: "bg-rose-500 text-white",
-    },
-    {
-      id: "ingest" as const,
-      label: "Ingest",
-      icon: Database,
-      badge: null,
-    },
-  ];
+  const leadView = !!userRole && isLead(userRole);
+  const cyberView = !!userRole && isCyber(userRole);
+  const tabs = cyberView
+    ? [
+        {
+          id: "ingest" as const,
+          label: "Ingest",
+          icon: Database,
+          badge: null,
+        },
+        {
+          id: "cyber" as const,
+          label: "Cyber",
+          icon: Radar,
+          badge: null,
+        },
+      ]
+    : [
+        {
+          id: "overview" as const,
+          label: "Overview",
+          icon: LayoutDashboard,
+          badge: null,
+        },
+        {
+          id: "graph" as const,
+          label: "Graph",
+          icon: Network,
+          badge: nodeCount > 0 ? `${nodeCount}` : null,
+          badgeColor: "bg-slate-800 text-slate-300",
+        },
+        {
+          id: "patterns" as const,
+          label: "Alerts",
+          icon: AlertTriangle,
+          badge: patternCount > 0 ? `${patternCount}` : null,
+          badgeColor: "bg-rose-500 text-white",
+        },
+        {
+          id: "sahayak" as const,
+          label: "SAHAYAK",
+          icon: Sparkles,
+          badge: null,
+        },
+      ];
 
   return (
     <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-950/95 backdrop-blur-md border-t border-slate-800/90 px-2 py-1 flex items-center justify-around select-none safe-area-pb shadow-2xl">

@@ -1,11 +1,13 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
 @layer base {
   :root {
     --background: 222.2 84% 4.9%;
     --foreground: 210 40% 98%;
+    /* Phase 1 Req2 — department palette (overridden at login via applyDepartmentTheme). */
+    --dept-primary: #0a2342;
+    --dept-secondary: #ffffff;
+    --dept-accent: #c5a059;
   }
 
   * {
@@ -92,7 +94,7 @@
   }
 
   .card-hover {
-    @apply card hover:bg-slate-800/50 transition-colors cursor-pointer;
+    @apply bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm hover:bg-slate-800/50 transition-colors cursor-pointer;
   }
 
   /* Badge variants */
@@ -101,27 +103,27 @@
   }
 
   .badge-amber {
-    @apply badge bg-amber-500/20 text-amber-300 border border-amber-500/30;
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30;
   }
 
   .badge-emerald {
-    @apply badge bg-emerald-500/20 text-emerald-300 border border-emerald-500/30;
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30;
   }
 
   .badge-rose {
-    @apply badge bg-rose-500/20 text-rose-300 border border-rose-500/30;
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30;
   }
 
   .badge-cyan {
-    @apply badge bg-cyan-500/20 text-cyan-300 border border-cyan-500/30;
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30;
   }
 
   .badge-indigo {
-    @apply badge bg-indigo-500/20 text-indigo-300 border border-indigo-500/30;
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30;
   }
 
   .badge-slate {
-    @apply badge bg-slate-800 text-slate-400 border border-slate-700;
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-400 border border-slate-700;
   }
 
   /* Animation utilities */
@@ -220,90 +222,61 @@
   }
 }
 
+/* Animation keyframes (top-level so Tailwind v4 always emits them) */
+@keyframes animate-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes animate-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes slide-in-from-right {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slide-in-from-top {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 @layer utilities {
-  /* Animation keyframes */
-  @keyframes animate-in {
-    from {
-      opacity: 0;
-      transform: translateY(4px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
-  @keyframes animate-out {
-    from {
-      opacity: 1;
-      transform: translateY(0);
-    }
-    to {
-      opacity: 0;
-      transform: translateY(-4px);
-    }
-  }
-
-  @keyframes slide-in-from-right {
-    from {
-      opacity: 0;
-      transform: translateX(20px);
-    }
-    to {
-      opacity: 1;
-      transform: translateX(0);
-    }
-  }
-
-  @keyframes slide-in-from-top {
-    from {
-      opacity: 0;
-      transform: translateY(-10px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
-  @keyframes fade-in {
-    from {
-      opacity: 0;
-    }
-    to {
-      opacity: 1;
-    }
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  @keyframes pulse {
-    0%, 100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.5;
-    }
-  }
-
-  @keyframes bounce {
-    0%, 100% {
-      transform: translateY(-5%);
-      animation-timing-function: cubic-bezier(0.8, 0, 1, 1);
-    }
-    50% {
-      transform: translateY(0);
-      animation-timing-function: cubic-bezier(0, 0, 0.2, 1);
-    }
-  }
-
   /* Gradient text */
   .gradient-text {
     @apply bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 bg-clip-text text-transparent;

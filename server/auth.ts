@@ -1,12 +1,17 @@
 import { Request, Response, NextFunction } from "express";
 import jsonwebtoken from "jsonwebtoken";
 import { db, DBUser } from "./db";
+import { isAdmin, tenureKey } from "../src/data/roles";
 
-const JWT_SECRET = process.env.JWT_SECRET || "crim-intel-national-security-vault-key-2026";
+const JWT_SECRET = process.env.JWT_SECRET || "trinetra-os-national-security-vault-key-2026";
+
+import type { DBRole } from "./db";
 
 export interface AuthenticatedRequest extends Request {
   user?: DBUser;
-  caseMemberRole?: "LEAD_INVESTIGATOR" | "FORENSIC_INVESTIGATOR" | "INVESTIGATOR" | "INSPECTOR" | "ADMIN";
+  caseMemberRole?: DBRole;
+  /** Phase 2 — per-case access level. Absent (legacy members) means FULL_EDIT. */
+  caseAccess?: "FULL_EDIT" | "VIEW_ONLY";
 }
 
 export function generateToken(user: DBUser): string {
@@ -82,7 +87,7 @@ export async function authenticateToken(
   next();
 }
 
-export function requireRole(allowedRoles: Array<"ADMIN" | "LEAD_INVESTIGATOR" | "FORENSIC_INVESTIGATOR" | "INVESTIGATOR" | "INSPECTOR">) {
+export function requireRole(allowedRoles: DBRole[]) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
     if (!req.user) {
       res.status(401).json({ error: "Authentication required" });
@@ -97,6 +102,30 @@ export function requireRole(allowedRoles: Array<"ADMIN" | "LEAD_INVESTIGATOR" | 
       return;
     }
 
+    next();
+  };
+}
+
+/**
+ * Phase 4 Req18 — functional gate: only the listed functionals (plus admins)
+ * may pass. Used to fence ingestion (FIELD/FORENSIC/CYBER) and OSINT/cyber
+ * toolchains (CYBER) away from Lead Investigators.
+ */
+export function requireFunctional(allowed: Array<"ADMIN" | "LEAD" | "CYBER" | "FORENSIC" | "FIELD">) {
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
+    if (!req.user) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    const parts = String(req.user.role).split("_");
+    const functional = parts[parts.length - 1] as "ADMIN" | "LEAD" | "CYBER" | "FORENSIC" | "FIELD";
+    if (!allowed.includes(functional)) {
+      res.status(403).json({
+        error: "Forbidden",
+        message: `Role '${req.user.role}' may not perform ingestion/cyber operations. Restricted to ${allowed.join("/")} personnel.`,
+      });
+      return;
+    }
     next();
   };
 }
@@ -117,9 +146,34 @@ export async function requireCaseMembership(
     return;
   }
 
-  // Admins have global audit & oversight access to all cases
-  if (req.user.role === "ADMIN") {
-    req.caseMemberRole = "ADMIN";
+  // Dept-scoped admins: bypass membership only within their own tenure.
+  // CBI_ADMIN sees CBI cases, POLICE_ADMIN(KA) sees only KARNATAKA cases, etc.
+  // Grandfathered joint-task-force seeds (multi-org members) stay accessible.
+  if (isAdmin(req.user.role)) {
+    const adminTenure = tenureKey(req.user.role, req.user.state);
+    let caseObj: any = null;
+    try {
+      caseObj = await db.cases.findOne(caseId as string);
+    } catch {
+      caseObj = null;
+    }
+    const caseOrg = caseObj?.org;
+    const caseState = caseObj?.state;
+    if (caseOrg && caseOrg !== "UNKNOWN") {
+      const caseTenure =
+        caseOrg === "POLICE"
+          ? `POLICE:${String(caseState || "POLICE").toUpperCase()}`
+          : String(caseOrg).toUpperCase();
+      if (caseTenure !== adminTenure) {
+        res.status(403).json({
+          error: "Tenant Isolation",
+          message: `Admin tenure '${adminTenure}' may not access case tenure '${caseTenure}'.`,
+        });
+        return;
+      }
+    }
+    req.caseMemberRole = req.user.role;
+    req.caseAccess = "FULL_EDIT";
     next();
     return;
   }
@@ -139,6 +193,30 @@ export async function requireCaseMembership(
   }
 
   req.caseMemberRole = membership.role;
+  req.caseAccess = membership.access || "FULL_EDIT";
+  next();
+}
+
+/**
+ * Phase 2 — blocks state-changing operations for VIEW_ONLY members
+ * (e.g. source department after an inter-department transfer).
+ */
+export function requireEditAccess(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  if (!req.user) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  if (req.caseAccess === "VIEW_ONLY") {
+    res.status(403).json({
+      error: "Read-only access",
+      message: "Your case access is VIEW_ONLY after inter-department transfer. Mutations are disabled.",
+    });
+    return;
+  }
   next();
 }
 

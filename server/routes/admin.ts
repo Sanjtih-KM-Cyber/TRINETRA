@@ -1,20 +1,43 @@
 import { Router, Response } from "express";
-import { db, DBAccessRequest, DBAuditLog, DBCaseMember } from "../db";
+import { db, DBAccessRequest, DBAuditLog, DBCaseMember, DBRole } from "../db";
 import { authenticateToken, requireRole, AuthenticatedRequest } from "../auth";
+import { ADMIN_ROLES, USER_ROLES, tenureKey, sameTenure, isAdmin } from "../../src/data/roles";
 import crypto from "crypto";
 
 const router = Router();
 
-// All routes here strictly require ADMIN role
+// All routes here strictly require a department Admin role (CBI_ADMIN/NIA_ADMIN/CID_ADMIN/POLICE_ADMIN)
 router.use(authenticateToken);
-router.use(requireRole(["ADMIN"]));
+router.use(requireRole([...ADMIN_ROLES] as DBRole[]));
 
-// Dashboard Governance Metrics
+function adminTenure(req: AuthenticatedRequest): string {
+  return tenureKey(req.user!.role, req.user!.state);
+}
+
+function caseTenureOf(c: any): string {
+  if (!c?.org || c.org === "UNKNOWN") return "SHARED";
+  return c.org === "POLICE" ? `POLICE:${String(c.state || "POLICE").toUpperCase()}` : String(c.org).toUpperCase();
+}
+
+function inAdminTenure(req: AuthenticatedRequest, role: string, state?: string): boolean {
+  return sameTenure(req.user!.role, req.user!.state, role, state);
+}
+
+// Dashboard Governance Metrics (dept-scoped)
 router.get("/dashboard", async (req: AuthenticatedRequest, res: Response) => {
-  const users = await db.users.find();
-  const requests = await db.access_requests.find();
+  const tenure = adminTenure(req);
+  const allUsers = await db.users.find();
+  const users = allUsers.filter((u) => sameTenure(req.user!.role, req.user!.state, u.role, u.state));
+  const allRequests = await db.access_requests.find();
+  const requests = allRequests.filter((r: any) =>
+    sameTenure(req.user!.role, req.user!.state, r.requested_role, r.state)
+  );
   const caseRequests = await db.case_access_requests.find();
-  const cases = await db.cases.find();
+  const allCases = await db.cases.find();
+  const cases = allCases.filter((c: any) => {
+    const ct = caseTenureOf(c);
+    return ct === "SHARED" || ct === tenure;
+  });
   const auditLogs = await db.audit_logs.find();
 
   const activeUsers = users.filter((u) => u.status === "ACTIVE").length;
@@ -31,6 +54,7 @@ router.get("/dashboard", async (req: AuthenticatedRequest, res: Response) => {
       suspendedUsers,
       activeCases: cases.length,
       auditLogCount: auditLogs.length,
+      tenure,
     },
     recentRequests: requests.slice(0, 5),
     recentCaseRequests: caseRequests.slice(0, 5),
@@ -38,13 +62,16 @@ router.get("/dashboard", async (req: AuthenticatedRequest, res: Response) => {
   });
 });
 
-// Case Access Requests List
+// Case Access Requests List (dept-scoped by requester tenure)
 router.get("/case-access-requests", async (req: AuthenticatedRequest, res: Response) => {
-  const requests = await db.case_access_requests.find();
+  const all = await db.case_access_requests.find();
+  const requests = all.filter((r: any) =>
+    sameTenure(req.user!.role, req.user!.state, r.user_role, (r as any).state)
+  );
   res.json({ requests });
 });
 
-// Approve Case Access Request
+// Approve Case Access Request (same-tenure only — Req8)
 router.post("/case-access-requests/:id/approve", async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const { notes } = req.body;
@@ -53,6 +80,29 @@ router.post("/case-access-requests/:id/approve", async (req: AuthenticatedReques
   if (!caseReq) {
     res.status(404).json({ error: "Case access request not found." });
     return;
+  }
+  if (!inAdminTenure(req, caseReq.user_role, (caseReq as any).state)) {
+    res.status(403).json({
+      error: "Tenant Isolation",
+      message: `Cannot approve '${caseReq.user_role}' outside admin tenure '${adminTenure(req)}'.`,
+    });
+    return;
+  }
+  const caseObj: any = await db.cases.findOne(caseReq.case_id).catch(() => null);
+  if (caseObj?.org && caseObj.org !== "UNKNOWN") {
+    const ct = caseTenureOf(caseObj);
+    const memberTenure = tenureKey(caseReq.user_role, (caseReq as any).state);
+    if (ct !== "SHARED" && ct !== memberTenure) {
+      res.status(403).json({
+        error: "Tenant Isolation",
+        message: `Member tenure '${memberTenure}' does not match case tenure '${ct}'.`,
+      });
+      return;
+    }
+    if (ct !== "SHARED" && ct !== adminTenure(req)) {
+      res.status(403).json({ error: "Tenant Isolation", message: "Case is outside your tenure." });
+      return;
+    }
   }
 
   const now = new Date().toISOString();
@@ -144,9 +194,12 @@ router.post("/case-access-requests/:id/reject", async (req: AuthenticatedRequest
   res.json({ success: true, message: "Case access request rejected." });
 });
 
-// Access Requests List
+// Access Requests List (dept-scoped by requested tenure)
 router.get("/access-requests", async (req: AuthenticatedRequest, res: Response) => {
-  const requests = await db.access_requests.find();
+  const all = await db.access_requests.find();
+  const requests = all.filter((r: any) =>
+    sameTenure(req.user!.role, req.user!.state, r.requested_role, (r as any).state)
+  );
   res.json({ requests });
 });
 
@@ -161,15 +214,21 @@ router.post("/access-requests/:id/approve", async (req: AuthenticatedRequest, re
     return;
   }
 
-  // Admin explicitly assigns role (LEAD_INVESTIGATOR or FORENSIC_INVESTIGATOR)
-  const roleToAssign: "LEAD_INVESTIGATOR" | "FORENSIC_INVESTIGATOR" =
-    assignedRole === "FORENSIC_INVESTIGATOR"
-      ? "FORENSIC_INVESTIGATOR"
-      : assignedRole === "LEAD_INVESTIGATOR"
-      ? "LEAD_INVESTIGATOR"
-      : accessReq.requested_role === "FORENSIC_INVESTIGATOR"
-      ? "FORENSIC_INVESTIGATOR"
-      : "LEAD_INVESTIGATOR";
+  // Admin assigns canonical Phase-0 roles within its own tenure only.
+  const VALID_ROLES: DBRole[] = [...USER_ROLES] as DBRole[];
+  const candidate = (assignedRole as DBRole) || accessReq.requested_role;
+  if (!VALID_ROLES.includes(candidate)) {
+    res.status(400).json({ error: `Role must be one of: ${VALID_ROLES.join(", ")}.` });
+    return;
+  }
+  if (!sameTenure(req.user!.role, req.user!.state, candidate, (accessReq as any).state)) {
+    res.status(403).json({
+      error: "Tenant Isolation",
+      message: `Admin tenure '${adminTenure(req)}' cannot approve role '${candidate}' outside its department/state.`,
+    });
+    return;
+  }
+  const roleToAssign: DBRole = candidate;
 
   const now = new Date().toISOString();
 
@@ -188,37 +247,61 @@ router.post("/access-requests/:id/approve", async (req: AuthenticatedRequest, re
   if (user) {
     await db.users.updateOne(user._id, {
       role: roleToAssign,
+      state: (accessReq as any).state || user.state,
       status: "ACTIVE",
       approved_by: req.user!._id,
       approved_at: now,
     });
 
-    // If default case provided or auto-assign to Garuda
+    // If default case provided or auto-assign to Garuda — skipped when the
+    // case tenure does not match the approved user (Req8: no cross-tenant seeding).
     const caseToAssign = defaultCaseId || "case-garuda";
-    const existingMember = await db.case_members.findOne({
-      case_id: caseToAssign,
-      user_id: user._id,
-    });
-
-    if (!existingMember) {
-      const member: DBCaseMember = {
-        _id: `mem-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+    const targetCase: any = await db.cases.findOne(caseToAssign).catch(() => null);
+    const userTenure = tenureKey(roleToAssign, (accessReq as any).state || user.state);
+    const targetTenure = targetCase ? caseTenureOf(targetCase) : "SHARED";
+    let autoAssigned = false;
+    if (!targetCase || targetTenure === "SHARED" || targetTenure === userTenure) {
+      const existingMember = await db.case_members.findOne({
         case_id: caseToAssign,
         user_id: user._id,
-        user_name: user.name,
-        user_email: user.email,
-        official_id: user.official_id,
-        agency: user.agency,
-        role: roleToAssign,
-        status: "ACTIVE",
-        assigned_at: now,
-        assigned_by: req.user!.name,
-      };
-      await db.case_members.insertOne(member);
-    } else {
-      await db.case_members.updateOne(existingMember._id, {
-        role: roleToAssign,
-        status: "ACTIVE",
+      });
+
+      if (!existingMember) {
+        const member: DBCaseMember = {
+          _id: `mem-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+          case_id: caseToAssign,
+          user_id: user._id,
+          user_name: user.name,
+          user_email: user.email,
+          official_id: user.official_id,
+          agency: user.agency,
+          role: roleToAssign,
+          state: (accessReq as any).state || user.state,
+          status: "ACTIVE",
+          assigned_at: now,
+          assigned_by: req.user!.name,
+        };
+        await db.case_members.insertOne(member);
+        autoAssigned = true;
+      } else {
+        await db.case_members.updateOne(existingMember._id, {
+          role: roleToAssign,
+          status: "ACTIVE",
+        });
+        autoAssigned = true;
+      }
+    }
+    if (!autoAssigned) {
+      await db.audit_logs.insertOne({
+        _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+        timestamp: now,
+        user_id: req.user!._id,
+        user_name: req.user!.name,
+        user_role: req.user!.role,
+        action: "ACCESS_REQUEST_AUTOASSIGN_SKIPPED",
+        details: `Auto-assign to ${caseToAssign} skipped: user tenure '${userTenure}' vs case tenure '${targetTenure}'.`,
+        digital_hash: crypto.createHash("sha256").update(`${id}:${roleToAssign}:SKIP:${now}`).digest("hex"),
+        result: "SUCCESS",
       });
     }
   }
@@ -282,9 +365,10 @@ router.post("/access-requests/:id/reject", async (req: AuthenticatedRequest, res
   res.json({ success: true, message: "Access request rejected." });
 });
 
-// List Users
+// List Users (dept-scoped)
 router.get("/users", async (req: AuthenticatedRequest, res: Response) => {
-  const users = await db.users.find();
+  const all = await db.users.find();
+  const users = all.filter((u) => sameTenure(req.user!.role, req.user!.state, u.role, u.state));
   const sanitized = users.map((u) => ({
     _id: u._id,
     name: u.name,
@@ -294,6 +378,7 @@ router.get("/users", async (req: AuthenticatedRequest, res: Response) => {
     designation: u.designation,
     department: u.department,
     role: u.role,
+    state: u.state,
     status: u.status,
     created_at: u.created_at,
     approved_by: u.approved_by,
@@ -319,6 +404,10 @@ router.patch("/users/:id/status", async (req: AuthenticatedRequest, res: Respons
     res.status(404).json({ error: "User not found" });
     return;
   }
+  if (!inAdminTenure(req, user.role, user.state)) {
+    res.status(403).json({ error: "Tenant Isolation", message: "Cannot change status outside your department/state." });
+    return;
+  }
 
   await db.users.updateOne(id, { status });
 
@@ -338,9 +427,14 @@ router.patch("/users/:id/status", async (req: AuthenticatedRequest, res: Respons
   res.json({ success: true, message: `User status updated to ${status}` });
 });
 
-// Cases & Case Access
+// Cases & Case Access (dept-scoped; SHARED legacy cases visible to all)
 router.get("/cases", async (req: AuthenticatedRequest, res: Response) => {
-  const cases = await db.cases.find();
+  const tenure = adminTenure(req);
+  const allCases = await db.cases.find();
+  const cases = allCases.filter((c: any) => {
+    const ct = caseTenureOf(c);
+    return ct === "SHARED" || ct === tenure;
+  });
   const allMembers = await db.case_members.find({});
 
   const enrichedCases = cases.map((c) => {
@@ -349,8 +443,8 @@ router.get("/cases", async (req: AuthenticatedRequest, res: Response) => {
       ...c,
       members,
       memberCount: members.length,
-      leadCount: members.filter((m) => m.role === "LEAD_INVESTIGATOR").length,
-      forensicCount: members.filter((m) => m.role === "FORENSIC_INVESTIGATOR").length,
+      leadCount: members.filter((m) => String(m.role).endsWith("_LEAD")).length,
+      forensicCount: members.filter((m) => String(m.role).endsWith("_FORENSIC")).length,
     };
   });
 
@@ -364,7 +458,7 @@ router.get("/cases/:caseId/members", async (req: AuthenticatedRequest, res: Resp
   res.json({ members });
 });
 
-// Assign Member to Case
+// Assign Member to Case (strict same-tenure: no cross-assignment / horizontal leakage)
 router.post("/cases/:caseId/members", async (req: AuthenticatedRequest, res: Response) => {
   const { caseId } = req.params;
   const { userId } = req.body;
@@ -373,6 +467,29 @@ router.post("/cases/:caseId/members", async (req: AuthenticatedRequest, res: Res
   if (!targetUser) {
     res.status(404).json({ error: "Target user not found" });
     return;
+  }
+  if (!inAdminTenure(req, targetUser.role, targetUser.state)) {
+    res.status(403).json({
+      error: "Tenant Isolation",
+      message: `Cannot assign '${targetUser.role}' outside admin tenure '${adminTenure(req)}'. Leads are compartmentalized per department/state.`,
+    });
+    return;
+  }
+  const caseObj: any = await db.cases.findOne(caseId).catch(() => null);
+  if (caseObj && caseObj.org && caseObj.org !== "UNKNOWN") {
+    const ct = caseTenureOf(caseObj);
+    if (ct !== "SHARED" && ct !== adminTenure(req)) {
+      res.status(403).json({ error: "Tenant Isolation", message: "Cannot assign members to a case outside your tenure." });
+      return;
+    }
+    const memberTenure = tenureKey(targetUser.role, targetUser.state);
+    if (ct !== "SHARED" && memberTenure !== ct) {
+      res.status(403).json({
+        error: "Tenant Isolation",
+        message: `Member tenure '${memberTenure}' does not match case tenure '${ct}'.`,
+      });
+      return;
+    }
   }
 
   const existing = await db.case_members.findOne({ case_id: caseId, user_id: userId });
@@ -391,6 +508,7 @@ router.post("/cases/:caseId/members", async (req: AuthenticatedRequest, res: Res
     official_id: targetUser.official_id,
     agency: targetUser.agency,
     role: targetUser.role as any,
+    state: targetUser.state,
     status: "ACTIVE",
     assigned_at: now,
     assigned_by: req.user!.name,
@@ -435,6 +553,73 @@ router.delete("/cases/:caseId/members/:userId", async (req: AuthenticatedRequest
   });
 
   res.json({ success: true, message: "Member removed from case." });
+});
+
+// Admin directory (Phase 6 Req27) — cross-tenure ADMIN listing for handover targeting.
+router.get("/admins", async (req: AuthenticatedRequest, res: Response) => {
+  const all = await db.users.find();
+  const admins = all
+    .filter((u) => u.status === "ACTIVE" && String(u.role).endsWith("_ADMIN"))
+    .map((u) => ({
+      _id: u._id,
+      name: u.name,
+      official_id: u.official_id,
+      email: u.email,
+      agency: u.agency,
+      role: u.role,
+      state: u.state,
+      tenure: tenureKey(u.role, u.state),
+    }));
+  res.json({ admins });
+});
+
+// Personnel requisitions queue (dept-scoped, Phase 3 Req17)
+router.get("/requisitions", async (req: AuthenticatedRequest, res: Response) => {
+  const all = await db.requisitions.find({});
+  const list = all.filter((r) =>
+    sameTenure(req.user!.role, req.user!.state, r.requested_by_role, r.requested_by_state)
+  );
+  res.json({ requisitions: list });
+});
+
+router.post("/requisitions/:id/approve", async (req: AuthenticatedRequest, res: Response) => {
+  const doc = await db.requisitions.findOne(req.params.id);
+  if (!doc || doc.status !== "PENDING") {
+    res.status(404).json({ error: "Pending requisition not found." });
+    return;
+  }
+  if (!sameTenure(req.user!.role, req.user!.state, doc.requested_by_role, doc.requested_by_state)) {
+    res.status(403).json({ error: "Tenant Isolation", message: "Requisition is outside your tenure." });
+    return;
+  }
+  const now = new Date().toISOString();
+  await db.requisitions.updateOne(doc._id, {
+    status: "APPROVED",
+    reviewed_by: req.user!.name,
+    reviewed_at: now,
+    review_notes: req.body?.notes,
+  });
+  res.json({ success: true });
+});
+
+router.post("/requisitions/:id/reject", async (req: AuthenticatedRequest, res: Response) => {
+  const doc = await db.requisitions.findOne(req.params.id);
+  if (!doc || doc.status !== "PENDING") {
+    res.status(404).json({ error: "Pending requisition not found." });
+    return;
+  }
+  if (!sameTenure(req.user!.role, req.user!.state, doc.requested_by_role, doc.requested_by_state)) {
+    res.status(403).json({ error: "Tenant Isolation", message: "Requisition is outside your tenure." });
+    return;
+  }
+  const now = new Date().toISOString();
+  await db.requisitions.updateOne(doc._id, {
+    status: "REJECTED",
+    reviewed_by: req.user!.name,
+    reviewed_at: now,
+    review_notes: req.body?.notes,
+  });
+  res.json({ success: true });
 });
 
 // System Audit Logs

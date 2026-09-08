@@ -46,6 +46,8 @@ interface EntityDetailDrawerProps {
   onUpdateReviewState?: (nodeId: string, newState: ReviewState) => void;
   onAddNote?: (nodeId: string, noteText: string) => void;
   onSelectLink?: (link: CrimeNetworkLink) => void;
+  onLocateOnMap?: (node: CrimeNetworkNode) => void;
+  onViewInGraph?: (node: CrimeNetworkNode) => void;
 }
 
 export const EntityDetailDrawer: React.FC<EntityDetailDrawerProps> = ({
@@ -58,6 +60,8 @@ export const EntityDetailDrawer: React.FC<EntityDetailDrawerProps> = ({
   onUpdateReviewState,
   onAddNote,
   onSelectLink,
+  onLocateOnMap,
+  onViewInGraph,
 }) => {
   const [newNoteText, setNewNoteText] = useState("");
   const [showDocPreview, setShowDocPreview] = useState(false);
@@ -274,6 +278,28 @@ export const EntityDetailDrawer: React.FC<EntityDetailDrawerProps> = ({
               <X className="w-5 h-5" />
             </button>
           </div>
+
+          {/* Graph ↔ Map Sync */}
+            {(onLocateOnMap || onViewInGraph) && (
+              <div className="px-4 sm:px-5 pt-3 flex gap-2">
+                {onViewInGraph && (
+                  <button
+                    onClick={() => node && onViewInGraph(node)}
+                    className="flex-1 py-2 px-3 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-[11px] font-bold transition-all flex items-center justify-center gap-1.5"
+                  >
+                    <Share2 className="w-3.5 h-3.5" /> View in Graph
+                  </button>
+                )}
+                {onLocateOnMap && node?.details?.geo?.lat && node?.details?.geo?.lng && (
+                  <button
+                    onClick={() => node && onLocateOnMap(node)}
+                    className="flex-1 py-2 px-3 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-[11px] font-bold transition-all flex items-center justify-center gap-1.5"
+                  >
+                    <MapPin className="w-3.5 h-3.5" /> Locate on Map
+                  </button>
+                )}
+              </div>
+            )}
 
           {/* Content Body */}
           <div className="p-4 sm:p-5 space-y-5 text-xs">

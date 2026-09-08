@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { caseApi } from "../../services/api";
+import { matrixFor } from "../../data/roleMatrices";
+import { orgOf } from "../../data/roles";
+import { departmentForUser } from "../../services/roleRouting";
+import { DataRequestInbox } from "../requisitions/DataRequestInbox";
 import {
   Shield,
   MapPin,
@@ -8,40 +12,26 @@ import {
   FileText,
   UserCheck,
   Send,
-  Plus,
-  Radio,
   CheckCircle2,
   AlertTriangle,
   RefreshCw,
   LogOut,
   FolderGit2,
   Calendar,
-  Layers,
-  Search,
-  ExternalLink,
-  ChevronRight,
-  Eye,
-  Crosshair,
-  BadgeAlert,
-  Car,
-  Phone,
   Link2,
-  Check,
-  ArrowRight,
-  Sparkles,
 } from "lucide-react";
 
 export const InvestigatorPortal: React.FC = () => {
   const { user, logout, authorizedCases, realtimeNotification, clearNotification } = useAuth();
 
-  const [activeTab, setActiveTab] = useState<"submit_observation" | "observations_log" | "field_reports" | "watchlist" | "feed">("submit_observation");
+  // Changes.md Field portal ("Police Login"): sighting form · reports · upload ledger · directives.
+  const [activeTab, setActiveTab] = useState<"submit_observation" | "observations_log" | "field_reports">("submit_observation");
   const [currentCaseId, setCurrentCaseId] = useState<string>(authorizedCases[0]?.id || "case-garuda");
 
   const [isLoading, setIsLoading] = useState(true);
   const [caseState, setCaseState] = useState<any>(null);
   const [observations, setObservations] = useState<any[]>([]);
   const [entities, setEntities] = useState<any[]>([]);
-  const [activityFeed, setActivityFeed] = useState<any[]>([]);
 
   // Submission Form States
   const [observationType, setObservationType] = useState<
@@ -50,6 +40,9 @@ export const InvestigatorPortal: React.FC = () => {
   const [title, setTitle] = useState("");
   const [narrative, setNarrative] = useState("");
   const [locationName, setLocationName] = useState("");
+  // GPS telemetry tagged to the observation (Phase: on-scene GPS coordinates).
+  const [gps, setGps] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
+  const [gpsBusy, setGpsBusy] = useState(false);
   const [selectedEntityId, setSelectedEntityId] = useState("");
   const [newEntityLabel, setNewEntityLabel] = useState("");
   const [newEntityType, setNewEntityType] = useState("PERSON");
@@ -61,10 +54,14 @@ export const InvestigatorPortal: React.FC = () => {
   const [relationType, setRelationType] = useState("ASSOCIATED_WITH");
   const [relationNotes, setRelationNotes] = useState("");
 
-  // Attachments
-  const [attachmentName, setAttachmentName] = useState("");
-  const [attachmentCategory, setAttachmentCategory] = useState<"PHOTO" | "AUDIO" | "VIDEO" | "DOCUMENT">("PHOTO");
+  // Attachments — Phase 4 Req21: real device capture (camera / voice notes / scans).
   const [attachmentList, setAttachmentList] = useState<any[]>([]);
+  const [isRecording, setIsRecording] = useState(false);
+  const recorderRef = React.useRef<MediaRecorder | null>(null);
+  const recordChunksRef = React.useRef<Blob[]>([]);
+  const photoInputRef = React.useRef<HTMLInputElement>(null);
+  const audioInputRef = React.useRef<HTMLInputElement>(null);
+  const docInputRef = React.useRef<HTMLInputElement>(null);
 
   // UI status
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -84,7 +81,6 @@ export const InvestigatorPortal: React.FC = () => {
       setCaseState(data);
       setObservations(data.observations || []);
       setEntities(data.nodes || []);
-      setActivityFeed(data.events || []);
     } catch (err: any) {
       setErrorMessage(err.message || "Failed to load case data.");
     } finally {
@@ -98,18 +94,50 @@ export const InvestigatorPortal: React.FC = () => {
     }
   }, [currentCaseId]);
 
-  const handleAddAttachment = () => {
-    if (!attachmentName.trim()) return;
-    const newAtt = {
-      id: `att-${Date.now()}`,
-      fileName: attachmentName.trim(),
-      fileType: attachmentCategory === "PHOTO" ? "image/jpeg" : attachmentCategory === "AUDIO" ? "audio/wav" : "application/pdf",
-      fileSizeFormatted: "2.8 MB",
-      sha256: `sha256:${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("")}`,
-      mediaCategory: attachmentCategory,
-    };
-    setAttachmentList((prev) => [...prev, newAtt]);
-    setAttachmentName("");
+  const pushFiles = (files: FileList | File[], mediaCategory: "PHOTO" | "AUDIO" | "DOCUMENT" | "VIDEO") => {
+    const arr = Array.from(files);
+    if (arr.length === 0) return;
+    const mapped = arr.map((f) => ({
+      id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      fileName: f.name || `${mediaCategory.toLowerCase()}-${Date.now()}`,
+      fileType: f.type || "application/octet-stream",
+      fileSize: f.size,
+      fileSizeFormatted: formatBytesLocal(f.size),
+      mediaCategory,
+      capturedAt: new Date().toISOString(),
+    }));
+    setAttachmentList((prev) => [...prev, ...mapped]);
+  };
+
+  const toggleVoiceNote = async () => {
+    if (isRecording) {
+      recorderRef.current?.stop();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      audioInputRef.current?.click();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const rec = new MediaRecorder(stream);
+      recordChunksRef.current = [];
+      rec.ondataavailable = (e) => {
+        if (e.data.size > 0) recordChunksRef.current.push(e.data);
+      };
+      rec.onstop = () => {
+        const blob = new Blob(recordChunksRef.current, { type: rec.mimeType || "audio/webm" });
+        const file = new File([blob], `voice-note-${Date.now()}.webm`, { type: blob.type });
+        pushFiles([file], "AUDIO");
+        stream.getTracks().forEach((t) => t.stop());
+        setIsRecording(false);
+      };
+      recorderRef.current = rec;
+      rec.start();
+      setIsRecording(true);
+    } catch {
+      audioInputRef.current?.click();
+    }
   };
 
   const handleRemoveAttachment = (id: string) => {
@@ -173,6 +201,8 @@ export const InvestigatorPortal: React.FC = () => {
           title: title.trim(),
           narrative: narrative.trim(),
           locationName: locationName.trim() || "Field Location",
+          lat: gps?.lat,
+          lng: gps?.lng,
           relatedEntities,
           observedRelationships,
           attachments: attachmentList,
@@ -184,10 +214,11 @@ export const InvestigatorPortal: React.FC = () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to submit observation");
 
-      setSuccessMessage("Field observation successfully validated, normalized, and integrated into canonical case dataset!");
+      setSuccessMessage("Field observation recorded and staged for Lead review — it appears in the Intake Pipeline in real time. Nothing reaches the graph before approval.");
       setTitle("");
       setNarrative("");
       setLocationName("");
+      setGps(null);
       setSelectedEntityId("");
       setNewEntityLabel("");
       setRelationSourceId("");
@@ -233,7 +264,7 @@ export const InvestigatorPortal: React.FC = () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to submit report");
 
-      setSuccessMessage("Field report committed to canonical intelligence pipeline with cryptographic SHA-256 fingerprint!");
+      setSuccessMessage("Field report staged for Lead review with cryptographic SHA-256 fingerprint — watch the Intake Pipeline for approval.");
       setReportTitle("");
       setReportText("");
 
@@ -274,15 +305,21 @@ export const InvestigatorPortal: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-base sm:text-lg font-bold tracking-tight text-slate-100 font-mono">
-                CRIM-INTEL OS
+                TRINETRA OS
               </h1>
               <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-blue-500/20 text-blue-400 border border-blue-500/40">
                 FIELD INVESTIGATOR PORTAL
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              Field Information Collection, Suspect Sightings & Sighting Interdiction Terminal
+              {user ? matrixFor(orgOf(user.role)).field.mandate : "Field Information Collection, Suspect Sightings & Sighting Interdiction Terminal"}
             </p>
+            {user && (
+              <p className="text-[10px] font-mono text-blue-300/80 mt-0.5">
+                {matrixFor(orgOf(user.role)).field.title} · staff: {matrixFor(orgOf(user.role)).field.staffingPrefix}* ·{" "}
+                {departmentForUser(user.role, user.agency || "", user.official_id || "").fullName}
+              </p>
+            )}
           </div>
         </div>
 
@@ -363,30 +400,22 @@ export const InvestigatorPortal: React.FC = () => {
           <span>Field Intelligence Reports</span>
         </button>
 
-        <button
-          onClick={() => setActiveTab("watchlist")}
-          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-            activeTab === "watchlist"
-              ? "bg-blue-600 text-white shadow-sm"
-              : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
-          }`}
-        >
-          <Crosshair className="w-3.5 h-3.5" />
-          <span>Case Target Watchlist ({entities.length})</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab("feed")}
-          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-            activeTab === "feed"
-              ? "bg-blue-600 text-white shadow-sm"
-              : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
-          }`}
-        >
-          <Radio className="w-3.5 h-3.5" />
-          <span>Live Field Interdiction Feed</span>
-        </button>
       </div>
+
+      {/* Active Incident Brief (Changes.md Field portal) */}
+      {(() => {
+        const brief = authorizedCases.find((c: any) => c.id === currentCaseId);
+        if (!brief) return null;
+        return (
+          <div className="px-4 sm:px-8 pt-4">
+            <div className="max-w-7xl mx-auto rounded-2xl bg-blue-600/10 border border-blue-500/30 p-4">
+              <div className="text-[10px] font-mono font-bold text-blue-300 uppercase tracking-widest">Active Incident Brief</div>
+              <div className="text-sm font-bold text-slate-100 mt-0.5">{brief.codeName} · {brief.name}</div>
+              <p className="text-xs text-slate-300 mt-1 leading-relaxed">{brief.description}</p>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 3. MAIN CONTENT CONTAINER */}
       <main className="flex-1 p-4 sm:p-8 max-w-7xl mx-auto w-full space-y-6">
@@ -427,7 +456,7 @@ export const InvestigatorPortal: React.FC = () => {
                   </div>
                   <div>
                     <h2 className="text-sm font-bold text-slate-100">Log Field Sighting & Surveillance Intel</h2>
-                    <p className="text-xs text-slate-400">Writes directly to canonical case graph via unified ingestion pipeline</p>
+                    <p className="text-xs text-slate-400">Structured by the Reconstructor and staged for Lead review — never writes the graph directly</p>
                   </div>
                 </div>
                 <span className="text-[10px] font-mono px-2.5 py-1 rounded bg-blue-500/10 border border-blue-500/30 text-blue-400 font-semibold">
@@ -445,7 +474,7 @@ export const InvestigatorPortal: React.FC = () => {
                     {[
                       { id: "SUSPECT_SIGHTING", label: "Suspect Sighting", icon: UserCheck },
                       { id: "LOCATION_SURVEILLANCE", label: "Location Stakeout", icon: MapPin },
-                      { id: "VEHICLE_TRACKING", label: "Vehicle / Convoy", icon: Car },
+                      { id: "VEHICLE_TRACKING", label: "Vehicle / Convoy", icon: Camera },
                       { id: "FIELD_INTEL_NOTE", label: "Informer Intel", icon: FileText },
                       { id: "RELATIONSHIP_OBSERVED", label: "Observed Handshake", icon: Link2 },
                     ].map((t) => {
@@ -490,14 +519,42 @@ export const InvestigatorPortal: React.FC = () => {
                     <label className="block text-xs font-semibold text-slate-300 mb-1">
                       Sighting Location / Sector <span className="text-blue-400">*</span>
                     </label>
-                    <input
-                      type="text"
-                      required
-                      value={locationName}
-                      onChange={(e) => setLocationName(e.target.value)}
-                      placeholder="e.g. Vashi Toll Plaza / Panvel Junction"
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    />
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        required
+                        value={locationName}
+                        onChange={(e) => setLocationName(e.target.value)}
+                        placeholder="e.g. Vashi Toll Plaza / Panvel Junction"
+                        className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!navigator.geolocation) {
+                            setErrorMessage("GPS is unavailable on this device.");
+                            return;
+                          }
+                          setGpsBusy(true);
+                          navigator.geolocation.getCurrentPosition(
+                            (pos) => {
+                              setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy });
+                              setGpsBusy(false);
+                            },
+                            () => {
+                              setErrorMessage("Could not acquire GPS fix. Enter the location manually.");
+                              setGpsBusy(false);
+                            },
+                            { enableHighAccuracy: true, timeout: 15000 }
+                          );
+                        }}
+                        disabled={gpsBusy}
+                        className="px-2.5 py-2 rounded-xl bg-blue-600/20 hover:bg-blue-600/40 border border-blue-500/40 text-blue-200 text-xs font-semibold shrink-0 disabled:opacity-50"
+                        title="Tag current GPS coordinates to this observation"
+                      >
+                        {gpsBusy ? "…" : gps ? `GPS ${gps.lat.toFixed(4)},${gps.lng.toFixed(4)}` : "Tag GPS"}
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -622,42 +679,76 @@ export const InvestigatorPortal: React.FC = () => {
                   </div>
                 </div>
 
-                {/* 6. Media / Photo Evidence Attachments */}
+                {/* 6. Field capture: live camera, voice notes, FIR scans, dossier files */}
                 <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2 text-xs font-bold text-blue-400 uppercase tracking-wider">
                       <Camera className="w-3.5 h-3.5" />
-                      <span>Bodycam / Sighting Photo Evidence</span>
+                      <span>Field Capture · Camera / Audio / FIR / Dossier</span>
                     </div>
-                    <span className="text-[10px] text-slate-500 font-mono">SHA-256 Auto-Digest</span>
+                    <span className="text-[10px] text-slate-500 font-mono">Device + hash sealed server-side</span>
                   </div>
 
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={attachmentName}
-                      onChange={(e) => setAttachmentName(e.target.value)}
-                      placeholder="e.g. panvel_surveillance_cam_0144.jpg"
-                      className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200"
-                    />
-                    <select
-                      value={attachmentCategory}
-                      onChange={(e) => setAttachmentCategory(e.target.value as any)}
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200"
-                    >
-                      <option value="PHOTO">PHOTO</option>
-                      <option value="AUDIO">AUDIO</option>
-                      <option value="VIDEO">VIDEO</option>
-                      <option value="DOCUMENT">DOCUMENT</option>
-                    </select>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <button
                       type="button"
-                      onClick={handleAddAttachment}
-                      className="px-3 py-1.5 rounded-lg bg-blue-600/30 hover:bg-blue-600 text-blue-200 border border-blue-500/40 text-xs font-semibold"
+                      onClick={() => photoInputRef.current?.click()}
+                      className="px-3 py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/40 text-blue-200 border border-blue-500/40 text-xs font-semibold"
                     >
-                      Attach
+                      📷 Camera / Photo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={toggleVoiceNote}
+                      className={`px-3 py-2 rounded-lg text-xs font-semibold border ${
+                        isRecording
+                          ? "bg-rose-500/20 text-rose-200 border-rose-500/50 animate-pulse"
+                          : "bg-blue-600/20 hover:bg-blue-600/40 text-blue-200 border-blue-500/40"
+                      }`}
+                    >
+                      {isRecording ? "⏹ Stop voice note" : "🎙 Witness voice note"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => docInputRef.current?.click()}
+                      className="px-3 py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/40 text-blue-200 border border-blue-500/40 text-xs font-semibold"
+                    >
+                      📄 FIR scan / Dossier
                     </button>
                   </div>
+                  <input
+                    ref={photoInputRef}
+                    type="file"
+                    accept="image/*,video/*"
+                    capture="environment"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files) pushFiles(e.target.files, "PHOTO");
+                      e.target.value = "";
+                    }}
+                  />
+                  <input
+                    ref={audioInputRef}
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files) pushFiles(e.target.files, "AUDIO");
+                      e.target.value = "";
+                    }}
+                  />
+                  <input
+                    ref={docInputRef}
+                    type="file"
+                    accept=".pdf,.doc,.docx,.txt,image/*"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files) pushFiles(e.target.files, "DOCUMENT");
+                      e.target.value = "";
+                    }}
+                  />
 
                   {attachmentList.length > 0 && (
                     <div className="space-y-1.5 pt-2">
@@ -854,10 +945,11 @@ export const InvestigatorPortal: React.FC = () => {
                     onChange={(e) => setReportType(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200"
                   >
-                    <option value="FIELD_INTERDICTION_MEMO">FIELD_INTERDICTION_MEMO</option>
-                    <option value="INFORMER_INTELLIGENCE_REPORT">INFORMER_INTELLIGENCE_REPORT</option>
-                    <option value="WITNESS_DEPOSITION">WITNESS_DEPOSITION</option>
-                    <option value="FIR">FIRST INFORMATION REPORT (FIR)</option>
+                    {(user ? matrixFor(orgOf(user.role)).field.logTypes : ["FIELD_INTEL_NOTE"]).map((lt) => (
+                      <option key={lt} value={lt}>
+                        {lt}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
@@ -885,117 +977,18 @@ export const InvestigatorPortal: React.FC = () => {
               </form>
             </div>
 
-            {/* Existing Exhibits */}
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
-              <h2 className="text-sm font-bold text-slate-100 pb-3 border-b border-slate-800">
-                Case Exhibits & Intake Records ({caseState?.evidenceFiles?.length || 0})
-              </h2>
-
-              <div className="space-y-2.5 max-h-[460px] overflow-y-auto">
-                {(caseState?.evidenceFiles || []).map((ev: any) => (
-                  <div key={ev.id} className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1">
-                    <div className="flex items-center justify-between">
-                      <strong className="text-slate-200 font-mono text-[11px]">{ev.fileName}</strong>
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400">
-                        {ev.lifecycleStatus || "COMMITTED"}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-400 leading-normal">{ev.summary}</p>
-                    <div className="flex justify-between text-[10px] text-slate-500 font-mono pt-1">
-                      <span>Source: {ev.sourceAuthority}</span>
-                      <span>Entities: {ev.extractedEntitiesCount || 0}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 4: CASE TARGET WATCHLIST */}
-        {activeTab === "watchlist" && (
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div>
-                <h2 className="text-sm font-bold text-slate-100">Active Syndicate Target Watchlist</h2>
-                <p className="text-xs text-slate-400">Identified entities and suspect vehicles for field interdiction</p>
-              </div>
-              <span className="text-xs font-mono font-bold text-blue-400 bg-blue-500/10 px-3 py-1 rounded-lg border border-blue-500/30">
-                {entities.length} TARGETS UNDER SURVEILLANCE
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-              {entities.map((ent) => (
-                <div
-                  key={ent.id}
-                  className="p-4 rounded-xl bg-slate-950 border border-slate-800 hover:border-blue-500/40 transition-colors space-y-2"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-900 text-blue-400 border border-slate-800">
-                      {ent.type}
-                    </span>
-                    <span
-                      className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${
-                        ent.riskScore >= 80
-                          ? "bg-rose-500/20 text-rose-400 border border-rose-500/30"
-                          : "bg-amber-500/20 text-amber-400 border border-amber-500/30"
-                      }`}
-                    >
-                      RISK: {ent.riskScore}%
-                    </span>
-                  </div>
-
-                  <h3 className="text-xs font-bold text-slate-100">{ent.label}</h3>
-                  <p className="text-[11px] text-slate-400">{ent.role || "Investigative Subject"}</p>
-
-                  {ent.aliases && ent.aliases.length > 0 && (
-                    <div className="text-[10px] text-slate-500 font-mono">
-                      Aliases: {ent.aliases.join(", ")}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* TAB 5: LIVE FIELD ACTIVITY FEED */}
-        {activeTab === "feed" && (
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-                <h2 className="text-sm font-bold text-slate-100">Live Interdiction & Intelligence Feed</h2>
-              </div>
-              <span className="text-xs text-slate-400 font-mono">Real-Time WebSocket Stream</span>
-            </div>
-
-            <div className="space-y-3">
-              {activityFeed.map((ev) => (
-                <div
-                  key={ev._id || ev.id}
-                  className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex items-start gap-3 text-xs"
-                >
-                  <div className="w-2 h-2 rounded-full bg-blue-400 mt-1.5 shrink-0" />
-                  <div className="flex-1 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <strong className="text-slate-200">{ev.title || ev.event_type}</strong>
-                      <span className="text-[10px] font-mono text-slate-500">
-                        {new Date(ev.timestamp).toLocaleTimeString()}
-                      </span>
-                    </div>
-                    <p className="text-slate-400 text-[11px] leading-normal">{ev.description}</p>
-                    <div className="text-[10px] font-mono text-slate-500">
-                      Officer: {ev.actor_name} ({ev.actor_role})
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+            {/* Phase 4 Req22 — Lead data requisitions assigned to FIELD */}
+            <DataRequestInbox caseId={currentCaseId} ownFunctional="FIELD" />
           </div>
         )}
       </main>
     </div>
   );
 };
+
+function formatBytesLocal(n: number): string {
+  if (!n || Number.isNaN(n)) return "0 B";
+  if (n >= 1048576) return `${(n / 1048576).toFixed(2)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}

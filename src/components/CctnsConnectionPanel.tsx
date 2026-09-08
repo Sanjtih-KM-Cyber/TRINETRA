@@ -1,15 +1,5 @@
-import React from "react";
-import { Shield, Wifi, Lock, Terminal, CheckCircle2, AlertCircle, Loader2, Zap, Database, Search, X, ChevronDown, ChevronUp, CheckCircle } from "lucide-react";
-
-interface CctnsConnectionPanelProps {
-  isConnected: boolean;
-  onConnect: () => void;
-  onDisconnect: () => void;
-  onSimulateError?: () => void;
-  onSimulateQuery?: () => void;
-  queryLog?: Array<{stage: string; message: string; timestamp: string}>;
-  latencyMs?: number;
-}
+import React, { useState, useEffect, useRef } from "react";
+import { Shield, Wifi, Lock, Terminal, CheckCircle2, AlertCircle, Zap, Database, Search, ChevronDown, ChevronUp } from "lucide-react";
 
 const STAGE_CONFIG: Record<string, { label: string; icon: React.ReactNode; color: string; progress: number }> = {
   DISCONNECTED: { label: "Disconnected", icon: <Wifi className="w-4 h-4" />, color: "text-slate-500", progress: 0 },

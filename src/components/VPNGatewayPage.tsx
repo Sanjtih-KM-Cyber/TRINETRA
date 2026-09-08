@@ -1,395 +1,329 @@
 import React, { useState, useEffect, useRef } from "react";
-import { useAuth } from "../context/AuthContext";
+import { useLanguage } from "../context/LanguageContext";
 import { VPNTunnel } from "./VPNTunnel";
-import { Shield, Lock, Wifi, AlertCircle, CheckCircle2, Loader2, Terminal, Key, User, Eye, EyeOff, Zap, RotateCcw, X } from "lucide-react";
+import {
+  vpnApi,
+  verifyCertificatePin,
+  isDemoMode,
+  VPN_GATEWAY_HOST,
+  PINNED_GATEWAY_FINGERPRINT,
+  type CertificateInfo,
+} from "../services/vpn";
+import { LanguageSelector } from "./i18n/LanguageSelector";
+import {
+  Shield, Lock, Wifi, AlertCircle, CheckCircle2, Loader2,
+  Terminal, Copy, Check, ArrowRight, RotateCcw, FileKey,
+} from "lucide-react";
 
 interface VPNGatewayPageProps {
   onAuthenticated: () => void;
 }
 
+type Stage = "idle" | "connecting" | "handshake" | "ready" | "error";
+
+const HANDSHAKE_STEPS = [
+  { label: "TCP Handshake", duration: 500 },
+  { label: "TLS 1.3 Client Hello", duration: 450 },
+  { label: "Certificate Verification + Pinning", duration: 700 },
+  { label: "mTLS Client Certificate", duration: 600 },
+  { label: "Key Exchange (ECDHE X25519)", duration: 500 },
+  { label: "Session Keys Derived (AES-256-GCM)", duration: 400 },
+  { label: "Tunnel Established + OTP Issued", duration: 300 },
+];
+
+const PRESENTED_CERT: CertificateInfo = {
+  subject: "CCTNS-GW-MH-01",
+  issuer: "NIC CA 2026",
+  validFrom: "2024-01-15",
+  validTo: "2027-03-15",
+  fingerprint: PINNED_GATEWAY_FINGERPRINT,
+  algorithm: "RSA-2048",
+  san: ["cctns-gateway.mh.gov.in", "cctns-gateway.int"],
+};
+
+/**
+ * Screen 1 — VPN tunnel gateway (tunnel only, no identity).
+ * The officer establishes the encrypted tunnel, copies the handshake OTP,
+ * and proceeds to Officer Sign-In where badge + PIN + OTP are verified.
+ */
 export const VPNGatewayPage: React.FC<VPNGatewayPageProps> = ({ onAuthenticated }) => {
-  const { login, isLoading: authLoading } = useAuth();
-  const [stage, setStage] = useState<"idle" | "connecting" | "handshake" | "authenticating" | "verified" | "error">("idle");
-  const [credentials, setCredentials] = useState({ badgeId: "", pin: "", otp: "" });
-  const [showOtp, setShowOtp] = useState(false);
+  const { t } = useLanguage();
+  const [stage, setStage] = useState<Stage>("idle");
+  const [clientCertPem, setClientCertPem] = useState("");
+  const [certFileName, setCertFileName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [handshakeStage, setHandshakeStage] = useState(0);
   const [certificate, setCertificate] = useState<CertificateInfo | null>(null);
-  const [tunnelEstablished, setTunnelEstablished] = useState(false);
-  const terminalRef = useRef<HTMLDivElement>(null);
+  const [handshakeOtp, setHandshakeOtp] = useState<string | null>(null);
+  const [handshakeOtpExpiry, setHandshakeOtpExpiry] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [terminalLines, setTerminalLines] = useState<string[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const demo = isDemoMode();
 
-  const handshakeStages = [
-    { label: "TCP Handshake", duration: 800 },
-    { label: "TLS 1.3 Client Hello", duration: 600 },
-    { label: "Certificate Verification", duration: 1000 },
-    { label: "Key Exchange (ECDHE)", duration: 800 },
-    { label: "Session Keys Derived", duration: 600 },
-    { label: "Tunnel Established", duration: 400 },
-  ];
-
-  const addTerminalLine = (text: string, type: "info" | "success" | "warning" | "error" = "info") => {
-    const timestamp = new Date().toLocaleTimeString();
-    const prefix = type === "error" ? "[ERROR]" : type === "warning" ? "[WARN]" : type === "success" ? "[OK]" : "[INFO]";
-    setTerminalLines(prev => [...prev, `${timestamp} ${prefix} ${text}`].slice(-20));
-  };
-
-  const simulateHandshake = async () => {
-    setStage("handshake");
-    addTerminalLine("Initiating VPN handshake to CCTNS-GW-MH-01...", "info");
-    
-    for (let i = 0; i < handshakeStages.length; i++) {
-      const stage = handshakeStages[i];
-      setHandshakeStage(i + 1);
-      addTerminalLine(stage.label, "info");
-      await new Promise(r => setTimeout(r, stage.duration));
-      
-      if (i === 2) {
-        // Certificate verification
-        const cert: CertificateInfo = {
-          subject: "CCTNS-GW-MH-01",
-          issuer: "NIC CA 2026",
-          validFrom: "2024-01-15",
-          validTo: "2027-03-15",
-          fingerprint: "A1:B2:C3:D4:E5:F6:78:90:AB:CD:EF:12:34:56:78:90",
-          algorithm: "RSA-2048",
-          san: ["cctns-gateway.mh.gov.in", "cctns-gateway.int"],
-        };
-        setCertificate(cert);
-        addTerminalLine("Certificate verified: NIC CA 2026 • Valid until 2027-03-15", "success");
-      }
-      
-      if (i === 3) {
-        addTerminalLine("ECDHE key exchange • Curve: X25519 • PFS enabled", "success");
-      }
-      
-      if (i === 4) {
-        addTerminalLine("Session keys derived • Cipher: TLS_AES_256_GCM_SHA384", "success");
-      }
-      
-      if (i === 5) {
-        addTerminalLine("Tunnel established • MTU: 1400 • Keepalive: 25s", "success");
-      }
-    }
-    
-    setTunnelEstablished(true);
-    setStage("authenticating");
-    addTerminalLine("Tunnel ready • Awaiting credentials...", "info");
-  };
-
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setStage("authenticating");
-    addTerminalLine(`Authenticating badge: ${credentials.badgeId}...`, "info");
-
-    try {
-      await login(credentials.badgeId, credentials.pin, credentials.otp || undefined);
-      addTerminalLine("Authentication successful", "success");
-      setStage("verified");
-      addTerminalLine("Access granted • Launching workstation...", "success");
-      setTimeout(() => onAuthenticated(), 1000);
-    } catch (err: any) {
-      addTerminalLine(`Authentication failed: ${err.message}`, "error");
-      setError(err.message || "Authentication failed");
-      setStage("error");
-    }
-  };
-
-  const handleDisconnect = () => {
-    setStage("idle");
-    setTunnelEstablished(false);
-    setHandshakeStage(0);
-    setCertificate(null);
-    setCredentials({ badgeId: "", pin: "", otp: "" });
-    setShowOtp(false);
-    setTerminalLines([]);
-    addTerminalLine("Disconnected from CCTNS-GW-MH-01", "warning");
+  const addLine = (text: string, type: "INFO" | "OK" | "WARN" | "ERROR" = "INFO") => {
+    const ts = new Date().toLocaleTimeString();
+    setTerminalLines((prev) => [...prev, `${ts} [${type}] ${text}`].slice(-30));
   };
 
   useEffect(() => {
-    if (stage === "idle") {
-      addTerminalLine("CRIM-INTEL OS v2.0 — VPN Gateway", "info");
-      addTerminalLine("Waiting for connection...", "info");
+    addLine(`TRINETRA OS — VPN Gateway (${VPN_GATEWAY_HOST})`, "INFO");
+    addLine(demo ? "CCTNS_DEMO_MODE=ON — anonymous tunnel handshake, OTP shown on screen" : "CCTNS_DEMO_MODE=OFF — production mTLS + pinned cert enforced", demo ? "WARN" : "INFO");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    terminalRef.current?.scrollTo({ top: terminalRef.current.scrollHeight });
+  }, [terminalLines]);
+
+  const runHandshake = async () => {
+    setError(null);
+    setHandshakeOtp(null);
+    setStage("connecting");
+    addLine(`Dialing ${VPN_GATEWAY_HOST}…`, "INFO");
+    await new Promise((r) => setTimeout(r, 400));
+    setStage("handshake");
+
+    for (let i = 0; i < HANDSHAKE_STEPS.length; i++) {
+      const step = HANDSHAKE_STEPS[i];
+      setHandshakeStage(i + 1);
+      addLine(step.label + "…", "INFO");
+      await new Promise((r) => setTimeout(r, demo ? Math.min(step.duration, 250) : step.duration));
+
+      if (i === 2) {
+        const check = verifyCertificatePin(PRESENTED_CERT);
+        if (!check.ok) {
+          addLine(check.reason, "ERROR");
+          setError(check.reason);
+          setStage("error");
+          return;
+        }
+        setCertificate(PRESENTED_CERT);
+        addLine(`Certificate verified: ${PRESENTED_CERT.issuer} · pin match · valid to ${PRESENTED_CERT.validTo}`, "OK");
+      }
+      if (i === 3) {
+        if (!demo && !clientCertPem.trim()) {
+          addLine("mTLS client certificate required in production mode. Attach your officer .pem.", "ERROR");
+          setError("mTLS client certificate required. Attach your issued officer certificate (.pem).");
+          setStage("error");
+          return;
+        }
+        addLine(demo && !clientCertPem.trim() ? "mTLS skipped (demo mode) — client cert optional" : "mTLS client certificate presented and verified", "OK");
+      }
+      if (i === 4) addLine("ECDHE X25519 · perfect forward secrecy · TLS_AES_256_GCM_SHA384", "OK");
+      if (i === 5) addLine("Session keys derived · rekey 3600s", "OK");
     }
-  }, [stage]);
+
+    // Anonymous handshake — no identity leaves the workstation on this screen.
+    setSubmitting(true);
+    try {
+      const vpn = await vpnApi.handshake(clientCertPem || undefined);
+      addLine(`VPN session ${vpn.vpnSession.slice(0, 18)}… · ${vpn.cipher} · ${vpn.protocol}${vpn.demo ? " · DEMO" : ""}${vpn.mtls ? " · mTLS" : ""}`, "OK");
+      addLine("Tunnel established · MTU 1400 · keepalive 25s", "OK");
+      if (vpn.otp) {
+        setHandshakeOtp(vpn.otp);
+        setHandshakeOtpExpiry(vpn.otpExpiresAt || null);
+        try {
+          sessionStorage.setItem("crim_intel_vpn_otp", vpn.otp);
+          if (vpn.otpExpiresAt) sessionStorage.setItem("crim_intel_vpn_otp_exp", vpn.otpExpiresAt);
+        } catch {
+          /* sessionStorage unavailable */
+        }
+        addLine(`Handshake OTP issued: ${vpn.otp} (valid 10 min) — copy it to Officer Sign-In.`, "OK");
+      }
+      setStage("ready");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Handshake failed";
+      addLine(msg, "ERROR");
+      setError(msg);
+      setStage("error");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const copyOtp = async () => {
+    if (!handshakeOtp) return;
+    try {
+      await navigator.clipboard.writeText(handshakeOtp);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+
+  const reset = () => {
+    setStage("idle");
+    setHandshakeStage(0);
+    setCertificate(null);
+    setHandshakeOtp(null);
+    setHandshakeOtpExpiry(null);
+    setError(null);
+    try {
+      sessionStorage.removeItem("crim_intel_vpn_otp");
+      sessionStorage.removeItem("crim_intel_vpn_otp_exp");
+    } catch {
+      /* noop */
+    }
+    vpnApi.disconnect().catch(() => undefined);
+    addLine("Tunnel torn down by operator.", "WARN");
+  };
 
   return (
-    <div className="vpn-gateway-page">
-      <div className="vpn-container">
-        {/* Header */}
-        <header className="vpn-header">
-          <div className="header-left">
-            <div className="logo">
-              <Shield className="w-8 h-8" />
-              <span className="logo-text">CRIM-INTEL OS</span>
-            </div>
-            <span className="version">v2.0 — SECURE WORKSTATION</span>
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+      <header className="border-b border-slate-800 bg-slate-950/95 px-4 sm:px-8 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+            <Shield className="w-5 h-5" />
           </div>
-          <div className="header-right">
-            <div className="gateway-info">
-              <Wifi className="w-4 h-4" />
-              <span>CCTNS-GW-MH-01</span>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-sm sm:text-base">{t("appTitle")}</span>
+              <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-amber-400 uppercase">
+                Restricted Gov Access
+              </span>
+              {demo && (
+                <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 uppercase">
+                  Demo gateway
+                </span>
+              )}
             </div>
+            <p className="text-[11px] text-slate-400 hidden sm:block">{t("appSubtitle")}</p>
           </div>
-        </header>
+        </div>
+        <div className="flex items-center gap-2">
+          <LanguageSelector />
+          <div className="hidden sm:flex items-center gap-1.5 text-xs font-mono text-slate-400 bg-slate-900 px-2.5 py-1.5 rounded-lg border border-slate-800">
+            <Wifi className="w-3.5 h-3.5" />
+            <span>{VPN_GATEWAY_HOST}</span>
+          </div>
+        </div>
+      </header>
 
-        {/* Main Content */}
-        <main className="vpn-main">
-          <div className="vpn-grid">
-            {/* Left Panel - Tunnel Visualization */}
-            <div className="panel tunnel-panel">
-              <div className="panel-header">
-                <div className="flex items-center gap-2">
-                  <Lock className="w-5 h-5" />
-                  <h2 className="panel-title">SECURE TUNNEL</h2>
-                </div>
-                <div className={`tunnel-status ${stage}`}>
-                  <span className="status-dot"></span>
-                  <span className="status-text">{getStatusText()}</span>
-                </div>
-              </div>
-
-              <VPNTunnel 
-                connected={tunnelEstablished} 
-                latency={tunnelEstablished ? 45 : 0}
-                stage={handshakeStage}
-                certificate={certificate}
-              />
-
-              {/* Handshake Progress */}
-              <div className="handshake-progress">
-                <h3 className="progress-title">HANDSHAKE PROGRESS</h3>
-                <div className="progress-steps">
-                  {handshakeStages.map((step, idx) => (
-                    <div key={idx} className={`progress-step ${idx < handshakeStage ? 'complete' : idx === handshakeStage ? 'current' : 'pending'}`}>
-                      <div className="step-indicator">
-                        {idx < handshakeStage ? (
-                          <CheckCircle2 className="w-4 h-4" />
-                        ) : idx === handshakeStage ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <span className="step-number">{idx + 1}</span>
-                        )}
-                      </div>
-                      <div className="step-label">{step.label}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Certificate Info */}
-              {certificate && (
-                <div className="certificate-panel">
-                  <h4 className="panel-title">
-                    <Shield className="w-4 h-4" /> CERTIFICATE VERIFIED
-                  </h4>
-                  <div className="cert-details">
-                    <div className="cert-row"><span>Subject:</span><span>{certificate.subject}</span></div>
-                    <div className="cert-row"><span>Issuer:</span><span>{certificate.issuer}</span></div>
-                    <div className="cert-row"><span>Valid:</span><span>{certificate.validFrom} → {certificate.validTo}</span></div>
-                    <div className="cert-row"><span>Algorithm:</span><span>{certificate.algorithm}</span></div>
-                    <div className="cert-row"><span>Fingerprint:</span><span className="fingerprint">{certificate.fingerprint}</span></div>
-                  </div>
-                </div>
-              )}
-
-              {/* Connection Stats */}
-              {tunnelEstablished && (
-                <div className="stats-grid">
-                  <div className="stat-card">
-                    <span className="stat-value">45ms</span>
-                    <span className="stat-label">Latency</span>
-                  </div>
-                  <div className="stat-card">
-                    <span className="stat-value">AES-256-GCM</span>
-                    <span className="stat-label">Cipher</span>
-                  </div>
-                  <div className="stat-card">
-                    <span className="stat-value">TLS 1.3</span>
-                    <span className="stat-label">Protocol</span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Right Panel - Credentials & Terminal */}
-            <div className="panel auth-panel">
-              {stage !== "verified" && (
-                <form onSubmit={handleLogin} className="auth-form">
-                  <div className="form-header">
-                    <div className="flex items-center gap-2">
-                      <User className="w-5 h-5" />
-                      <h2 className="panel-title">OFFICER CREDENTIALS</h2>
-                    </div>
-                    <div className={`connection-badge ${stage}`}>
-                      {stage === "authenticating" && <Loader2 className="w-4 h-4 animate-spin" />}
-                      {stage === "verified" && <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
-                      {stage === "error" && <AlertCircle className="w-4 h-4 text-rose-400" />}
-                    </div>
-                  </div>
-
-                  {error && (
-                    <div className="error-banner">
-                      <AlertCircle className="w-4 h-4" />
-                      <span>{error}</span>
-                    </div>
-                  )}
-
-                  <div className="form-group">
-                    <label htmlFor="badgeId">Badge ID</label>
-                    <div className="input-wrapper">
-                      <User className="input-icon" />
-                      <input
-                        id="badgeId"
-                        type="text"
-                        value={credentials.badgeId}
-                        onChange={e => setCredentials({...credentials, badgeId: e.target.value})}
-                        placeholder="e.g., DP-FIELD-502"
-                        autoComplete="username"
-                        disabled={stage === "authenticating" || stage === "verified"}
-                        required
-                      />
-                    </div>
-                  </div>
-
-                  <div className="form-group">
-                    <label htmlFor="pin">PIN</label>
-                    <div className="input-wrapper">
-                      <Lock className="input-icon" />
-                      <input
-                        id="pin"
-                        type="password"
-                        value={credentials.pin}
-                        onChange={e => setCredentials({...credentials, pin: e.target.value})}
-                        placeholder="4-digit PIN"
-                        autoComplete="current-password"
-                        disabled={stage === "authenticating" || stage === "verified"}
-                        required
-                        maxLength={4}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="form-group">
-                    <label htmlFor="otp">OTP (if enabled)</label>
-                    <div className="input-wrapper">
-                      <Key className="input-icon" />
-                      <input
-                        id="otp"
-                        type="text"
-                        value={credentials.otp}
-                        onChange={e => setCredentials({...credentials, otp: e.target.value})}
-                        placeholder="6-digit OTP"
-                        autoComplete="one-time-code"
-                        disabled={stage === "authenticating" || stage === "verified"}
-                        maxLength={6}
-                      />
-                    </div>
-                  </div>
-
-                  <button 
-                    type="submit" 
-                    className="btn-primary"
-                    disabled={stage === "authenticating" || stage === "verified" || !credentials.badgeId || !credentials.pin}
-                  >
-                    {stage === "authenticating" ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>AUTHENTICATING...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Lock className="w-4 h-4" />
-                        <span>ESTABLISH SECURE TUNNEL</span>
-                      </>
-                    )}
-                  </button>
-                </form>
-              )}
-
-              {stage === "verified" && (
-                <div className="success-state">
-                  <div className="success-icon">
-                    <CheckCircle2 className="w-12 h-12 text-emerald-400" />
-                  </div>
-                  <h3>ACCESS GRANTED</h3>
-                  <p>Welcome back, Officer. Launching workstation...</p>
-                  <div className="launch-bar">
-                    <div className="launch-progress" style={{ width: "100%" }} />
-                  </div>
-                </div>
-              )}
-
-              {stage === "error" && (
-                <div className="error-state">
-                  <AlertCircle className="w-12 h-12 text-rose-400" />
-                  <h3>AUTHENTICATION FAILED</h3>
-                  <p>{error}</p>
-                  <button onClick={() => setStage("idle")} className="btn-secondary">
-                    <RotateCcw className="w-4 h-4" />
-                    <span>TRY AGAIN</span>
-                  </button>
-                </div>
-              )}
-            </div>
+      {/* Centered tunnel-only column */}
+      <main className="flex-1 w-full max-w-2xl mx-auto px-4 py-8 flex flex-col gap-4">
+        <section className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-bold flex items-center gap-2">
+              <Lock className="w-4 h-4 text-cyan-400" /> {t("secureTunnel")}
+            </h2>
+            <span className="text-[10px] font-mono px-2 py-1 rounded-lg border border-slate-700 text-slate-300">
+              <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1.5 ${stage === "ready" ? "bg-emerald-400" : stage === "error" ? "bg-rose-400" : stage === "idle" ? "bg-slate-500" : "bg-cyan-400 animate-pulse"}`} />
+              {stage === "idle" ? "DISCONNECTED" : stage === "ready" ? "TUNNEL ACTIVE · SECURE" : stage === "error" ? "CONNECTION FAILED" : "HANDSHAKE IN PROGRESS"}
+            </span>
           </div>
 
-          {/* Terminal */}
-          <div className="panel terminal-panel">
-            <div className="terminal-header">
-              <div className="terminal-title">
-                <Terminal className="w-4 h-4" />
-                <span>SYSTEM LOG</span>
-              </div>
-              <div className="terminal-controls">
-                <span className="text-[10px] text-slate-400 font-mono">{new Date().toLocaleTimeString()}</span>
-              </div>
-            </div>
-            <div ref={terminalRef} className="terminal-content">
-              {terminalLines.map((line, idx) => (
-                <div key={idx} className="terminal-line">
-                  <span className="terminal-timestamp">{line.split(']')[0]}]</span>
-                  <span className={`terminal-message ${getLineType(line)}`}>{line.split('] ')[1]}</span>
+          <VPNTunnel connected={stage === "ready"} latency={stage === "ready" ? 45 : 0} stage={handshakeStage} certificate={certificate} />
+
+          <div>
+            <h3 className="text-[11px] font-mono font-bold text-slate-400 mb-2">HANDSHAKE PROGRESS</h3>
+            <div className="space-y-1.5">
+              {HANDSHAKE_STEPS.map((s, idx) => (
+                <div key={s.label} className="flex items-center gap-2 text-xs">
+                  <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border ${idx < handshakeStage ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300" : "bg-slate-800 border-slate-700 text-slate-500"}`}>
+                    {idx < handshakeStage ? "✓" : idx + 1}
+                  </span>
+                  <span className={idx < handshakeStage ? "text-slate-200" : "text-slate-500"}>{s.label}</span>
                 </div>
               ))}
             </div>
           </div>
-        </div>
+
+          {certificate && (
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs space-y-1">
+              <div className="font-bold text-emerald-300 flex items-center gap-1.5"><Shield className="w-3.5 h-3.5" /> CERTIFICATE PINNED + VERIFIED</div>
+              <div className="font-mono text-[11px] text-slate-300">Subject: {certificate.subject} · Issuer: {certificate.issuer}</div>
+              <div className="font-mono text-[11px] text-slate-400">Valid: {certificate.validFrom} → {certificate.validTo} · {certificate.algorithm}</div>
+              <div className="font-mono text-[10px] text-slate-500 break-all">SHA-256 pin: {certificate.fingerprint}</div>
+            </div>
+          )}
+
+          {error && (
+            <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
+            <div className="flex items-center gap-1.5 text-[11px] font-mono font-bold text-slate-400 mb-2">
+              <FileKey className="w-3.5 h-3.5" /> mTLS OFFICER CERTIFICATE {demo ? "(optional in demo)" : "(required)"}
+            </div>
+            <label className="block text-[11px] text-slate-400 mb-1.5">
+              Attach issued client certificate (.pem) {certFileName && <span className="text-emerald-300 font-mono">· {certFileName}</span>}
+            </label>
+            <input
+              type="file"
+              accept=".pem,.crt,.cer,.txt"
+              onChange={async (e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                setCertFileName(f.name);
+                const text = await f.text();
+                setClientCertPem(text.slice(0, 8000));
+                addLine(`mTLS client cert loaded: ${f.name} (${f.size} bytes)`, "INFO");
+              }}
+              className="block w-full text-[11px] font-mono text-slate-300 file:mr-2 file:px-2.5 file:py-1.5 file:rounded-lg file:border file:border-slate-700 file:bg-slate-800 file:text-slate-200"
+            />
+          </div>
+
+          {stage === "idle" || stage === "error" ? (
+            <button onClick={runHandshake} disabled={submitting} className="btn-primary w-full disabled:opacity-50">
+              {submitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Establishing…</> : <><Lock className="w-4 h-4" /> Connect Tunnel</>}
+            </button>
+          ) : stage === "ready" ? null : (
+            <button disabled className="btn-secondary w-full justify-center opacity-70">
+              <Loader2 className="w-4 h-4 animate-spin" /> Handshake in progress…
+            </button>
+          )}
+
+          {stage === "ready" && handshakeOtp && (
+            <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 text-center space-y-2">
+              <div className="text-[10px] font-mono font-bold text-amber-300 uppercase tracking-widest">
+                Your tunnel OTP — copy it to Officer Sign-In
+              </div>
+              <div className="font-mono text-4xl font-black tracking-[0.4em] text-amber-200 pl-2">{handshakeOtp}</div>
+              {handshakeOtpExpiry && (
+                <div className="text-[10px] font-mono text-amber-300/80">Valid until {new Date(handshakeOtpExpiry).toLocaleTimeString()} · bound to this tunnel</div>
+              )}
+              <div className="flex gap-2 justify-center pt-1">
+                <button onClick={copyOtp} className="btn-secondary">
+                  {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  {copied ? "Copied" : "Copy OTP"}
+                </button>
+                <button onClick={onAuthenticated} className="btn-primary">
+                  Proceed to Officer Sign-In <ArrowRight className="w-4 h-4" />
+                </button>
+              </div>
+              <button onClick={reset} className="text-[11px] text-slate-400 hover:text-slate-200 inline-flex items-center gap-1">
+                <RotateCcw className="w-3 h-3" /> Tear down & restart
+              </button>
+            </div>
+          )}
+        </section>
+
+        <section className="rounded-xl border border-slate-800 bg-slate-950/70">
+          <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 text-[11px] font-mono font-bold text-slate-400">
+            <Terminal className="w-3.5 h-3.5" /> SYSTEM LOG
+          </div>
+          <div ref={terminalRef} className="h-36 overflow-y-auto p-3 space-y-1 font-mono text-[11px] leading-relaxed">
+            {terminalLines.map((l, i) => (
+              <div key={i} className={l.includes("[ERROR]") ? "text-rose-300" : l.includes("[OK]") ? "text-emerald-300" : l.includes("[WARN]") ? "text-amber-300" : "text-slate-400"}>
+                {l}
+              </div>
+            ))}
+          </div>
+        </section>
       </main>
-      </div>
-      </div>
+
+      <footer className="border-t border-slate-800 px-4 sm:px-8 py-3 text-[11px] text-slate-500 flex flex-col sm:flex-row justify-between gap-1">
+        <span>TRINETRA OS · mTLS + pinned TLS 1.3 · Section 65B BSA compliant chain</span>
+        <span className="font-mono">Pin: {PINNED_GATEWAY_FINGERPRINT.slice(0, 23)}… · {demo ? "DEMO MODE" : "PRODUCTION"}</span>
+      </footer>
     </div>
   );
 };
-
-function getStatusText(): string {
-  switch (stage) {
-    case "idle": return "DISCONNECTED";
-    case "connecting": return "CONNECTING...";
-    case "handshake": return "HANDSHAKE IN PROGRESS";
-    case "authenticating": return "AWAITING CREDENTIALS";
-    case "verified": return "TUNNEL ACTIVE • SECURE";
-    case "error": return "AUTHENTICATION FAILED";
-    default: return "UNKNOWN";
-  }
-}
-
-function getLineType(line: string): string {
-  if (line.includes("[ERROR]")) return "error";
-  if (line.includes("[WARN]")) return "warning";
-  if (line.includes("[OK]")) return "success";
-  return "info";
-}
-
-interface CertificateInfo {
-  subject: string;
-  issuer: string;
-  validFrom: string;
-  validTo: string;
-  fingerprint: string;
-  algorithm: string;
-  san: string[];
-}
 
 export default VPNGatewayPage;

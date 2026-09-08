@@ -1,12 +1,16 @@
 import crypto from "crypto";
-import { db, DBEvidence, DBEntity, DBRelationship, DBObservation, DBInvestigationEvent, DBAuditLog } from "../db";
+import { db, DBEvidence, DBEntity, DBRelationship, DBObservation, DBInvestigationEvent, DBAuditLog, DBRole } from "../db";
 import { broadcastCaseUpdate } from "../realtime";
 import { extractEntitiesUniversal, parseCDRCSV, parseFinancialCSV, extractEntitiesRuleBased } from "../../src/services/nlpExtractor";
+import { stageCandidates } from "./stagingService";
+// Normalizers live in the Reconstructor (single home for all intake paths).
+import { normalizePhoneNumber, normalizeVehiclePlate, normalizeText } from "./reconstructor";
+export { normalizePhoneNumber, normalizeVehiclePlate, normalizeText };
 
 export interface IngestionActor {
   id: string;
   name: string;
-  role: "ADMIN" | "LEAD_INVESTIGATOR" | "FORENSIC_INVESTIGATOR" | "INVESTIGATOR" | "INSPECTOR";
+  role: DBRole;
   badge?: string;
   agency?: string;
 }
@@ -21,6 +25,12 @@ export interface IngestionInput {
   fileSize?: number;
   fileSizeFormatted?: string;
   summary?: string;
+  /**
+   * stageOnly: structure + stage for Lead review instead of writing the
+   * main graph. Field, forensic and cyber intake always use this — only
+   * the Lead's own workstation commits directly.
+   */
+  stageOnly?: boolean;
   observationMetadata?: {
     observationType?:
       | "SUSPECT_SIGHTING"
@@ -62,6 +72,7 @@ export interface IngestionResult {
   observationRecord?: DBObservation;
   resolvedEntities: DBEntity[];
   extractedRelationships: DBRelationship[];
+  stagedBatchId?: string;
   pipelineStages: {
     validation: "PASSED";
     normalization: "PASSED";
@@ -78,34 +89,13 @@ export interface IngestionResult {
       count: number;
       provenance: string;
     };
-    canonicalStorage: "COMMITTED";
+    canonicalStorage: "COMMITTED" | "STAGED_FOR_REVIEW";
     eventEmission: "BROADCASTED";
   };
 }
 
-// 1. Phone Normalizer (+91 standard)
-export function normalizePhoneNumber(rawPhone: string): string {
-  if (!rawPhone) return "";
-  const digits = rawPhone.replace(/\D/g, "");
-  if (digits.length === 10) return `+91${digits}`;
-  if (digits.length === 12 && digits.startsWith("91")) return `+${digits}`;
-  return rawPhone.trim();
-}
-
-// 2. Vehicle Plate Normalizer (e.g. MH-04-AZ-8890)
-export function normalizeVehiclePlate(plate: string): string {
-  if (!plate) return "";
-  return plate.toUpperCase().replace(/\s+/g, "-").trim();
-}
-
-// 3. String Text Cleaner
-export function normalizeText(text: string): string {
-  if (!text) return "";
-  return text.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ").trim();
-}
-
 export async function processIngestionPipeline(input: IngestionInput): Promise<IngestionResult> {
-  const { caseId, actor, sourceAuthority, fileName, fileType, rawText, fileSize, fileSizeFormatted, summary, observationMetadata } = input;
+  const { caseId, actor, sourceAuthority, fileName, fileType, rawText, fileSize, fileSizeFormatted, summary, observationMetadata, stageOnly } = input;
   const now = new Date().toISOString();
 
   // STAGE 1: VALIDATION
@@ -461,23 +451,75 @@ export async function processIngestionPipeline(input: IngestionInput): Promise<I
     await db.observations.insertOne(observationRecord);
   }
 
-  // 3. Upsert Entities
-  if (resolvedEntities.length > 0) {
-    await db.entities.upsertMany(resolvedEntities);
-  }
+  // 3-4. Graph write OR staging. stageOnly keeps the main graph untouched —
+  // Lead review admits each item explicitly.
+  let stagedBatchId: string | undefined;
+  if (stageOnly) {
+    const labelById = new Map(resolvedEntities.map((e) => [e.id, e.label]));
+    const toStageLinks = extractedRelationships
+      .filter((l) => labelById.has(String(l.source)) && labelById.has(String(l.target)))
+      .map((l) => ({
+        sourceLabel: labelById.get(String(l.source))!,
+        targetLabel: labelById.get(String(l.target))!,
+        relationType: l.relationType,
+        weight: l.weight,
+        frequency: l.frequency,
+        amount: l.amount,
+        details: l.details,
+        evidenceRef: exhibitId,
+        locator: undefined as string | undefined,
+      }));
+    const stagingSource =
+      fileType === "CDR_CSV" || fileType === "FINANCIAL_CSV"
+        ? fileType
+        : observationMetadata
+        ? "INTEL_REPORT"
+        : fileType === "FIR" || fileType === "PDF"
+        ? "FIR"
+        : "CYBER_LOG";
+    const staged = await stageCandidates({
+      caseId,
+      source: stagingSource,
+      fileName: normalizedFileName,
+      enrichment: "PIPELINE_UNIVERSAL",
+      provider: "universal extraction pipeline",
+      entities: resolvedEntities.map((e) => ({
+        label: e.label,
+        type: e.type,
+        role: e.role,
+        riskScore: e.riskScore,
+        confidence: e.confidence,
+        details: e.details,
+        evidenceRef: exhibitId,
+        locator: undefined as string | undefined,
+      })),
+      links: toStageLinks,
+      actor: { _id: actor.id, name: actor.name, official_id: actor.badge || "", email: "", password_hash: "", agency: actor.agency || "", designation: actor.role, department: "", role: actor.role, status: "ACTIVE", created_at: now } as any,
+      note: `Staged from ${fileType} via ingestion pipeline (${mergedCount} would-be merges held for review).`,
+      content: normalizedRaw,
+    });
+    stagedBatchId = staged.batchId;
+  } else {
+    // 3. Upsert Entities
+    if (resolvedEntities.length > 0) {
+      await db.entities.upsertMany(resolvedEntities);
+    }
 
-  // 4. Upsert Relationships
-  if (extractedRelationships.length > 0) {
-    await db.relationships.upsertMany(extractedRelationships);
+    // 4. Upsert Relationships
+    if (extractedRelationships.length > 0) {
+      await db.relationships.upsertMany(extractedRelationships);
+    }
   }
 
   // 5. Investigation Event
   const eventRecord: DBInvestigationEvent = {
     _id: `ev-${Date.now()}`,
     case_id: caseId,
-    event_type: observationMetadata ? "FIELD_OBSERVATION_INTEGRATED" : "INTELLIGENCE_INGESTED",
-    title: observationMetadata ? `Field Intel: ${normalizedFileName}` : `Exhibit Intake: ${normalizedFileName}`,
-    description: `Integrated ${resolvedEntities.length} entities and ${extractedRelationships.length} relationships into case graph.`,
+    event_type: observationMetadata ? "FIELD_OBSERVATION_INTEGRATED" : stageOnly ? "INTELLIGENCE_STAGED" : "INTELLIGENCE_INGESTED",
+    title: observationMetadata ? `Field Intel: ${normalizedFileName}` : stageOnly ? `Staged Intake: ${normalizedFileName}` : `Exhibit Intake: ${normalizedFileName}`,
+    description: stageOnly
+      ? `Staged ${resolvedEntities.length} entities and ${extractedRelationships.length} relationships for Lead review.`
+      : `Integrated ${resolvedEntities.length} entities and ${extractedRelationships.length} relationships into case graph.`,
     timestamp: now,
     actor_id: actor.id,
     actor_name: actor.name,
@@ -497,31 +539,50 @@ export async function processIngestionPipeline(input: IngestionInput): Promise<I
     user_id: actor.id,
     user_name: actor.name,
     user_role: actor.role,
-    action: observationMetadata ? "FIELD_OBSERVATION_SUBMITTED" : "INGEST_EVIDENCE_PIPELINE",
+    action: observationMetadata ? "FIELD_OBSERVATION_SUBMITTED" : stageOnly ? "INTELLIGENCE_STAGED" : "INGEST_EVIDENCE_PIPELINE",
     case_id: caseId,
     resource_id: exhibitId,
     target_label: normalizedFileName,
-    details: `Officer ${actor.name} (${actor.role}) committed ${resolvedEntities.length} entities (${mergedCount} merged, ${createdCount} new) and ${extractedRelationships.length} relationships from exhibit ${normalizedFileName}.`,
+    details: stageOnly
+      ? `Officer ${actor.name} (${actor.role}) staged ${resolvedEntities.length} entities and ${extractedRelationships.length} relationships from exhibit ${normalizedFileName} for Lead review (batch ${stagedBatchId}).`
+      : `Officer ${actor.name} (${actor.role}) committed ${resolvedEntities.length} entities (${mergedCount} merged, ${createdCount} new) and ${extractedRelationships.length} relationships from exhibit ${normalizedFileName}.`,
     digital_hash: `sha256:${auditDigest}`,
     result: "SUCCESS",
   };
   await db.audit_logs.insertOne(auditLog);
 
   // STAGE 8: REAL-TIME EVENT EMISSION
-  broadcastCaseUpdate(caseId, {
-    event_type: observationMetadata ? "FIELD_OBSERVATION_INTEGRATED" : "EVIDENCE_COMMITTED",
-    title: observationMetadata ? "New Field Observation Integrated" : "New Intelligence Ingested",
-    message: `${actor.name} (${actor.role}) added ${resolvedEntities.length} entities & ${extractedRelationships.length} links to ${caseId}.`,
-    changes: {
-      new_evidence: 1,
-      new_entities: resolvedEntities.length,
-      new_relationships: extractedRelationships.length,
-      new_alerts: 1,
-    },
-    evidence_id: exhibitId,
-    actor_name: actor.name,
-    actor_role: actor.role,
-  });
+  if (stageOnly) {
+    broadcastCaseUpdate(caseId, {
+      event_type: "STAGING_UPDATED",
+      title: "New Intake Staged for Review",
+      message: `${actor.name} (${actor.role}) staged ${resolvedEntities.length} entities & ${extractedRelationships.length} links from ${normalizedFileName}.`,
+      changes: {
+        new_evidence: 1,
+        new_entities: resolvedEntities.length,
+        new_relationships: extractedRelationships.length,
+        new_alerts: 1,
+      },
+      evidence_id: exhibitId,
+      actor_name: actor.name,
+      actor_role: actor.role,
+    });
+  } else {
+    broadcastCaseUpdate(caseId, {
+      event_type: observationMetadata ? "FIELD_OBSERVATION_INTEGRATED" : "EVIDENCE_COMMITTED",
+      title: observationMetadata ? "New Field Observation Integrated" : "New Intelligence Ingested",
+      message: `${actor.name} (${actor.role}) added ${resolvedEntities.length} entities & ${extractedRelationships.length} links to ${caseId}.`,
+      changes: {
+        new_evidence: 1,
+        new_entities: resolvedEntities.length,
+        new_relationships: extractedRelationships.length,
+        new_alerts: 1,
+      },
+      evidence_id: exhibitId,
+      actor_name: actor.name,
+      actor_role: actor.role,
+    });
+  }
 
   return {
     success: true,
@@ -529,6 +590,7 @@ export async function processIngestionPipeline(input: IngestionInput): Promise<I
     observationRecord,
     resolvedEntities,
     extractedRelationships,
+    stagedBatchId,
     pipelineStages: {
       validation: "PASSED",
       normalization: "PASSED",
@@ -545,7 +607,7 @@ export async function processIngestionPipeline(input: IngestionInput): Promise<I
         count: extractedRelationships.length,
         provenance: extractedRelationships[0]?.provenance || "FORENSIC_EXTRACTION",
       },
-      canonicalStorage: "COMMITTED",
+      canonicalStorage: stageOnly ? "STAGED_FOR_REVIEW" : "COMMITTED",
       eventEmission: "BROADCASTED",
     },
   };

@@ -29,6 +29,8 @@ interface MyCasesViewProps {
   onCreateNewCase?: () => void;
   onClose?: () => void;
   activeCaseId?: string;
+  /** Phase 3 Req14 — bumped on CASE_CREATED so the list refreshes without reload. */
+  refreshSignal?: number;
 }
 
 export const MyCasesView: React.FC<MyCasesViewProps> = ({
@@ -37,6 +39,7 @@ export const MyCasesView: React.FC<MyCasesViewProps> = ({
   onCreateNewCase,
   onClose,
   activeCaseId,
+  refreshSignal,
 }) => {
   const { user, logout, refreshAuthorizedCases } = useAuth();
 
@@ -69,7 +72,14 @@ export const MyCasesView: React.FC<MyCasesViewProps> = ({
 
   useEffect(() => {
     loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Phase 3 Req14 — live refresh on workspace signal (new case registered).
+  useEffect(() => {
+    if (refreshSignal && refreshSignal > 0) loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshSignal]);
 
   const handleOpenRequestModal = (caseId?: string) => {
     setPreselectedCaseId(caseId);
@@ -129,7 +139,7 @@ export const MyCasesView: React.FC<MyCasesViewProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-mono font-bold tracking-wider text-amber-400">
-                CRIM-INTEL OS
+                TRINETRA OS
               </span>
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 font-mono border border-amber-500/20">
                 v4.2 SECURE
@@ -159,14 +169,19 @@ export const MyCasesView: React.FC<MyCasesViewProps> = ({
                 : "bg-purple-500/10 text-purple-400 border-purple-500/30"
             }`}
           >
-            {user?.role === "LEAD_INVESTIGATOR"
+            {String(user?.role || "").endsWith("_LEAD")
               ? "LEAD IO"
-              : user?.role === "FORENSIC_INVESTIGATOR"
+              : String(user?.role || "").endsWith("_FORENSIC")
               ? "FORENSIC"
+              : String(user?.role || "").endsWith("_CYBER")
+              ? "CYBER"
+              : String(user?.role || "").endsWith("_FIELD")
+              ? "FIELD"
               : "ADMIN"}
           </div>
 
-          {onCreateNewCase && (
+          {/* Phase 3 Req16 — case creation is ADMIN-only (server-enforced). */}
+          {onCreateNewCase && String(user?.role || "").endsWith("_ADMIN") && (
             <button
               onClick={onCreateNewCase}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 text-xs font-bold transition-all shadow-md shadow-amber-500/10 active:scale-95"

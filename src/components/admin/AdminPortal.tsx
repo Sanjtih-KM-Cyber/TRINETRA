@@ -1,35 +1,31 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { adminApi } from "../../services/api";
-import { UserAccount, AccessRequest, CaseMember } from "../../types";
+import { UserAccount, AccessRequest } from "../../types";
+import { USER_ROLES, tenureKey } from "../../data/roles";
+import { MigrationPanel } from "./MigrationPanel";
+import { RegisterCaseInline, AssignLeadInline, StaffingRequisitions } from "./CaseAdminActions";
 import {
   Shield,
   Users,
   UserCheck,
-  UserX,
-  FileText,
-  Clock,
   FolderGit2,
-  Lock,
   LogOut,
   CheckCircle2,
-  XCircle,
   AlertTriangle,
   RefreshCw,
-  Search,
-  Building,
   KeyRound,
   Fingerprint,
   Layers,
   ChevronRight,
-  Plus,
-  Trash2,
+  ArrowRightLeft,
 } from "lucide-react";
 
 export const AdminPortal: React.FC = () => {
   const { user, logout } = useAuth();
+  // Changes.md Admin portal: Dashboard · Access Clearance · Cases · Migration Hub.
   const [activeSection, setActiveSection] = useState<
-    "dashboard" | "requests" | "users" | "case_access" | "audit" | "cases"
+    "dashboard" | "requests" | "cases" | "migration"
   >("dashboard");
 
   const [isLoading, setIsLoading] = useState(true);
@@ -38,27 +34,26 @@ export const AdminPortal: React.FC = () => {
   const [caseRequests, setCaseRequests] = useState<any[]>([]);
   const [users, setUsers] = useState<UserAccount[]>([]);
   const [cases, setCases] = useState<any[]>([]);
-  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [requisitions, setRequisitions] = useState<any[]>([]);
   const [selectedCaseId, setSelectedCaseId] = useState<string>("case-garuda");
-  const [caseMembers, setCaseMembers] = useState<CaseMember[]>([]);
+  const [caseFilter, setCaseFilter] = useState<"all" | "unassigned">("all");
 
   // Action status state
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [selectedUserToAssign, setSelectedUserToAssign] = useState<string>("");
-  const [assignedRolesMap, setAssignedRolesMap] = useState<Record<string, "LEAD_INVESTIGATOR" | "FORENSIC_INVESTIGATOR" | "INVESTIGATOR">>({});
+  const [assignedRolesMap, setAssignedRolesMap] = useState<Record<string, string>>({});
 
   const loadData = async () => {
     setIsLoading(true);
     setActionError(null);
     try {
-      const [dashRes, reqsRes, caseReqsRes, usersRes, casesRes, auditRes] = await Promise.all([
+      const [dashRes, reqsRes, caseReqsRes, usersRes, casesRes, reqRes] = await Promise.all([
         adminApi.getDashboard(),
         adminApi.getAccessRequests(),
         adminApi.getCaseAccessRequests(),
         adminApi.getUsers(),
         adminApi.getCases(),
-        adminApi.getAuditLogs(),
+        adminApi.getRequisitions().catch(() => ({ requisitions: [] })),
       ]);
 
       setMetrics(dashRes.metrics);
@@ -66,13 +61,10 @@ export const AdminPortal: React.FC = () => {
       setCaseRequests(caseReqsRes.requests || []);
       setUsers(usersRes.users || []);
       setCases(casesRes.cases || []);
-      setAuditLogs(auditRes.logs || []);
+      setRequisitions(reqRes.requisitions || []);
 
       if (casesRes.cases?.length > 0) {
-        const defaultCase = casesRes.cases[0].id;
-        setSelectedCaseId(defaultCase);
-        const membersRes = await adminApi.getCaseMembers(defaultCase);
-        setCaseMembers(membersRes.members || []);
+        setSelectedCaseId(casesRes.cases[0].id);
       }
     } catch (err: any) {
       setActionError(err.message || "Failed to load admin data.");
@@ -84,16 +76,6 @@ export const AdminPortal: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
-
-  const handleCaseChange = async (caseId: string) => {
-    setSelectedCaseId(caseId);
-    try {
-      const membersRes = await adminApi.getCaseMembers(caseId);
-      setCaseMembers(membersRes.members || []);
-    } catch (err: any) {
-      setActionError(err.message || "Failed to load case members.");
-    }
-  };
 
   const handleApproveCaseRequest = async (requestId: string) => {
     setActionError(null);
@@ -122,7 +104,7 @@ export const AdminPortal: React.FC = () => {
   const handleApproveRequest = async (requestId: string, requestedRole?: string) => {
     setActionError(null);
     setActionSuccess(null);
-    const assignedRole = assignedRolesMap[requestId] || (requestedRole === "FORENSIC_INVESTIGATOR" ? "FORENSIC_INVESTIGATOR" : "LEAD_INVESTIGATOR");
+    const assignedRole = assignedRolesMap[requestId] || requestedRole || "CBI_LEAD";
     try {
       await adminApi.approveRequest(requestId, "Approved by System Administrator", selectedCaseId, assignedRole);
       setActionSuccess(`Access request approved and user activated with role ${assignedRole}.`);
@@ -156,35 +138,6 @@ export const AdminPortal: React.FC = () => {
     }
   };
 
-  const handleAssignMember = async () => {
-    if (!selectedUserToAssign || !selectedCaseId) return;
-    setActionError(null);
-    setActionSuccess(null);
-    try {
-      await adminApi.assignCaseMember(selectedCaseId, selectedUserToAssign);
-      setActionSuccess("Investigator assigned to case successfully.");
-      setSelectedUserToAssign("");
-      const membersRes = await adminApi.getCaseMembers(selectedCaseId);
-      setCaseMembers(membersRes.members || []);
-    } catch (err: any) {
-      setActionError(err.message || "Failed to assign investigator.");
-    }
-  };
-
-  const handleRemoveMember = async (userId: string) => {
-    if (!selectedCaseId) return;
-    setActionError(null);
-    setActionSuccess(null);
-    try {
-      await adminApi.removeCaseMember(selectedCaseId, userId);
-      setActionSuccess("Investigator removed from case.");
-      const membersRes = await adminApi.getCaseMembers(selectedCaseId);
-      setCaseMembers(membersRes.members || []);
-    } catch (err: any) {
-      setActionError(err.message || "Failed to remove member.");
-    }
-  };
-
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       {/* Admin Top Header */}
@@ -196,11 +149,23 @@ export const AdminPortal: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="font-bold text-sm sm:text-base text-slate-100">
-                CRIM-INTEL OS • Administration Control Center
+                TRINETRA OS • Administration Control Center
               </h1>
               <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                ADMIN
+                {user?.role || "ADMIN"}
+                {(user as any)?.state ? ` · ${(user as any).state}` : ""}
               </span>
+              {user && (
+                <span
+                  className="text-[10px] font-mono font-bold px-2 py-0.5 rounded border"
+                  style={{
+                    borderColor: "color-mix(in srgb, var(--dept-accent) 45%, transparent)",
+                    color: "var(--dept-accent)",
+                  }}
+                >
+                  TENURE: {tenureKey(user.role, (user as any).state)}
+                </span>
+              )}
             </div>
             <p className="text-[11px] text-slate-400">
               Multi-Agency Access Governance, Authorization & Case Membership
@@ -276,48 +241,6 @@ export const AdminPortal: React.FC = () => {
                   )}
                 </button>
 
-                <button
-                  onClick={() => setActiveSection("users")}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition-all ${
-                    activeSection === "users"
-                      ? "bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
-                      : "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <Users className="w-4 h-4" />
-                    <span>Users & Clearance</span>
-                  </div>
-                  <span className="text-[10px] font-mono text-slate-400">{users.length}</span>
-                </button>
-
-                <button
-                  onClick={() => setActiveSection("case_access")}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition-all ${
-                    activeSection === "case_access"
-                      ? "bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
-                      : "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <KeyRound className="w-4 h-4" />
-                    <span>Case Membership</span>
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => setActiveSection("audit")}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition-all ${
-                    activeSection === "audit"
-                      ? "bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
-                      : "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <Fingerprint className="w-4 h-4" />
-                    <span>System Audit Trail</span>
-                  </div>
-                </button>
               </nav>
             </div>
 
@@ -340,6 +263,21 @@ export const AdminPortal: React.FC = () => {
                   </div>
                   <span className="text-[10px] font-mono text-slate-400">{cases.length}</span>
                 </button>
+
+                <button
+                  onClick={() => setActiveSection("migration")}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition-all ${
+                    activeSection === "migration"
+                      ? "bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
+                      : "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <ArrowRightLeft className="w-4 h-4" />
+                    <span>Handover & Migration</span>
+                  </div>
+                </button>
+
               </nav>
             </div>
           </div>
@@ -439,7 +377,7 @@ export const AdminPortal: React.FC = () => {
               </div>
 
               {/* Pending Requests & Quick Actions */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 gap-6">
                 {/* Recent Access Requests */}
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
                   <div className="flex items-center justify-between">
@@ -502,49 +440,6 @@ export const AdminPortal: React.FC = () => {
                           </div>
                         ))
                     )}
-                  </div>
-                </div>
-
-                {/* Recent System Audits */}
-                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200 flex items-center gap-2">
-                      <Fingerprint className="w-4 h-4 text-rose-400" />
-                      <span>Recent Cryptographic Audit Records</span>
-                    </h3>
-                    <button
-                      onClick={() => setActiveSection("audit")}
-                      className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1"
-                    >
-                      <span>View All</span>
-                      <ChevronRight className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-
-                  <div className="space-y-2.5">
-                    {auditLogs.slice(0, 4).map((log) => (
-                      <div
-                        key={log._id}
-                        className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-start justify-between gap-3 text-xs"
-                      >
-                        <div>
-                          <div className="flex items-center gap-2 font-mono text-[11px]">
-                            <span className="font-semibold text-slate-200">{log.user_name || log.officerName || "SYSTEM"}</span>
-                            <span className="text-slate-400">({log.user_role || log.officerRole || "SYSTEM"})</span>
-                            <span className="px-1.5 py-0.2 rounded bg-slate-900 text-indigo-300 border border-slate-800 text-[10px]">
-                              {log.action || log.actionType}
-                            </span>
-                          </div>
-                          <p className="text-slate-400 text-[11px] mt-1">{log.details}</p>
-                          <span className="font-mono text-[10px] text-slate-400 block mt-1">
-                            Digest: {log.digital_hash?.slice(0, 24)}...
-                          </span>
-                        </div>
-                        <span className="text-[10px] font-mono text-slate-400 shrink-0">
-                          {new Date(log.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                        </span>
-                      </div>
-                    ))}
                   </div>
                 </div>
               </div>
@@ -614,14 +509,16 @@ export const AdminPortal: React.FC = () => {
                             onChange={(e) =>
                               setAssignedRolesMap((prev) => ({
                                 ...prev,
-                                [req._id]: e.target.value as "LEAD_INVESTIGATOR" | "FORENSIC_INVESTIGATOR" | "INVESTIGATOR",
+                                [req._id]: e.target.value,
                               }))
                             }
                             className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-amber-400 font-semibold focus:outline-none"
                           >
-                            <option value="LEAD_INVESTIGATOR">LEAD_INVESTIGATOR</option>
-                            <option value="FORENSIC_INVESTIGATOR">FORENSIC_INVESTIGATOR</option>
-                            <option value="INVESTIGATOR">INVESTIGATOR</option>
+                            {USER_ROLES.map((r) => (
+                              <option key={r} value={r}>
+                                {r}
+                              </option>
+                            ))}
                           </select>
                         </div>
                         <div className="flex items-center gap-2">
@@ -724,271 +621,59 @@ export const AdminPortal: React.FC = () => {
                   )}
                 </div>
               </div>
-            </div>
-          )}
 
-          {/* ================= 3. USERS & CLEARANCE ================= */}
-          {activeSection === "users" && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-lg sm:text-xl font-bold text-slate-100 tracking-tight">
-                  User Clearance & Authorization Directory
-                </h2>
-                <p className="text-xs sm:text-sm text-slate-400">
-                  Manage active officer profiles, suspension, and authorization levels.
-                </p>
-              </div>
+              <StaffingRequisitions
+                requisitions={requisitions}
+                onDecided={loadData}
+                onNotice={(ok, text) => {
+                  if (ok) {
+                    setActionSuccess(text);
+                    setActionError(null);
+                  } else {
+                    setActionError(text);
+                    setActionSuccess(null);
+                  }
+                }}
+              />
 
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-950/80 border-b border-slate-800 text-slate-400 font-mono text-[11px] uppercase">
-                      <tr>
-                        <th className="py-3.5 px-4">Officer Name & ID</th>
-                        <th className="py-3.5 px-4">Agency & Dept</th>
-                        <th className="py-3.5 px-4">Role</th>
-                        <th className="py-3.5 px-4">Status</th>
-                        <th className="py-3.5 px-4">Last Activity</th>
-                        <th className="py-3.5 px-4 text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800/80">
-                      {users.map((u) => (
-                        <tr key={u._id} className="hover:bg-slate-850/50 transition-colors">
-                          <td className="py-3.5 px-4">
-                            <div className="font-bold text-slate-100">{u.name}</div>
-                            <div className="font-mono text-[11px] text-slate-400">{u.official_id} • {u.email}</div>
-                          </td>
-                          <td className="py-3.5 px-4">
-                            <div className="text-slate-300">{u.agency}</div>
-                            <div className="text-slate-400 text-[11px]">{u.designation}</div>
-                          </td>
-                          <td className="py-3.5 px-4">
-                            <span
-                              className={`font-mono text-[10px] font-bold px-2 py-0.5 rounded border ${
-                                u.role === "ADMIN"
-                                  ? "bg-indigo-500/20 text-indigo-300 border-indigo-500/40"
-                                  : u.role === "LEAD_INVESTIGATOR"
-                                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
-                                  : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
-                              }`}
-                            >
-                              {u.role}
-                            </span>
-                          </td>
-                          <td className="py-3.5 px-4">
-                            <span
-                              className={`font-mono text-[10px] font-bold px-2 py-0.5 rounded ${
-                                u.status === "ACTIVE"
-                                  ? "bg-emerald-500/20 text-emerald-400"
-                                  : u.status === "PENDING"
-                                  ? "bg-amber-500/20 text-amber-400"
-                                  : "bg-rose-500/20 text-rose-400"
-                              }`}
-                            >
-                              {u.status}
-                            </span>
-                          </td>
-                          <td className="py-3.5 px-4 font-mono text-[11px] text-slate-400">
-                            {u.last_login ? new Date(u.last_login).toLocaleString() : "Never"}
-                          </td>
-                          <td className="py-3.5 px-4 text-right">
-                            {u.role !== "ADMIN" && (
-                              <div className="flex items-center justify-end gap-1.5">
-                                {u.status === "ACTIVE" ? (
-                                  <button
-                                    onClick={() => handleStatusChange(u._id, "SUSPENDED")}
-                                    className="px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 font-semibold"
-                                  >
-                                    Suspend
-                                  </button>
-                                ) : (
-                                  <button
-                                    onClick={() => handleStatusChange(u._id, "ACTIVE")}
-                                    className="px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 font-semibold"
-                                  >
-                                    Activate
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+              {/* Sub-section: Locked accounts (wrong-OTP lockouts awaiting reactivation) */}
+              <div className="pt-6 border-t border-slate-800 space-y-4">
+                <div>
+                  <h3 className="text-base font-bold text-slate-100">Locked Accounts ({users.filter((u) => u.status === "SUSPENDED").length})</h3>
+                  <p className="text-xs text-slate-400">
+                    Officers locked out by repeated wrong OTPs. Reactivate to restore login credentials.
+                  </p>
                 </div>
-              </div>
-            </div>
-          )}
-
-          {/* ================= 4. CASE MEMBERSHIP GOVERNANCE ================= */}
-          {activeSection === "case_access" && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-lg sm:text-xl font-bold text-slate-100 tracking-tight">
-                  Case Assignment & Multi-Officer Membership
-                </h2>
-                <p className="text-xs sm:text-sm text-slate-400">
-                  Assign Lead and Forensic Investigators to specific interdiction operations.
-                </p>
-              </div>
-
-              {/* Case Picker & Add Member Row */}
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                      Select Target Case / Operation:
-                    </label>
-                    <select
-                      value={selectedCaseId}
-                      onChange={(e) => handleCaseChange(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-amber-400 font-mono font-bold focus:outline-none focus:ring-1 focus:ring-amber-500"
-                    >
-                      {cases.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.codeName} • {c.name}
-                        </option>
-                      ))}
-                    </select>
+                {users.filter((u) => u.status === "SUSPENDED").length === 0 ? (
+                  <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 text-center text-xs text-slate-400">
+                    No locked accounts in your tenure.
                   </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                      Assign New Investigator to Case:
-                    </label>
-                    <div className="flex gap-2">
-                      <select
-                        value={selectedUserToAssign}
-                        onChange={(e) => setSelectedUserToAssign(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                      >
-                        <option value="">Select an active officer...</option>
-                        {users
-                          .filter((u) => u.status === "ACTIVE" && u.role !== "ADMIN")
-                          .filter((u) => !caseMembers.some((m) => m.user_id === u._id))
-                          .map((u) => (
-                            <option key={u._id} value={u._id}>
-                              {u.name} ({u.role} - {u.agency})
-                            </option>
-                          ))}
-                      </select>
-                      <button
-                        onClick={handleAssignMember}
-                        disabled={!selectedUserToAssign}
-                        className="px-3.5 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-slate-950 font-bold text-xs flex items-center gap-1 shrink-0 disabled:opacity-40"
-                      >
-                        <Plus className="w-4 h-4" />
-                        <span>Assign</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Members Table */}
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm">
-                <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                    Assigned SIT Personnel ({caseMembers.length})
-                  </h3>
-                  <span className="font-mono text-[10px] text-slate-400">
-                    Operation: {selectedCaseId}
-                  </span>
-                </div>
-
-                <div className="divide-y divide-slate-800/80">
-                  {caseMembers.length === 0 ? (
-                    <div className="p-8 text-center text-xs text-slate-400">
-                      No investigators currently assigned to this case.
-                    </div>
-                  ) : (
-                    caseMembers.map((m) => (
-                      <div
-                        key={m._id}
-                        className="p-4 flex items-center justify-between gap-4 hover:bg-slate-850/40 transition-colors"
-                      >
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold text-xs text-slate-100">{m.user_name}</span>
-                            <span
-                              className={`text-[10px] font-mono font-bold px-2 py-0.2 rounded border ${
-                                m.role === "LEAD_INVESTIGATOR"
-                                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
-                                  : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
-                              }`}
-                            >
-                              {m.role}
-                            </span>
-                          </div>
-                          <div className="text-[11px] text-slate-400 mt-0.5">
-                            {m.official_id} • {m.agency}
-                          </div>
-                          <div className="text-[10px] font-mono text-slate-400 mt-1">
-                            Assigned on: {new Date(m.assigned_at).toLocaleDateString()}
-                          </div>
+                ) : (
+                  <div className="space-y-2">
+                    {users.filter((u) => u.status === "SUSPENDED").map((u) => (
+                      <div key={u._id} className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-4">
+                        <div className="min-w-0">
+                          <div className="font-bold text-sm text-slate-100">{u.name}</div>
+                          <div className="font-mono text-[11px] text-slate-400">{u.official_id} • {u.role}</div>
                         </div>
-
                         <button
-                          onClick={() => handleRemoveMember(m.user_id)}
-                          className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-center gap-1 transition-all"
-                          title="Revoke Case Access"
+                          onClick={() => handleStatusChange(u._id, "ACTIVE")}
+                          className="px-4 py-2 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs font-bold shrink-0"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span className="hidden sm:inline">Revoke Access</span>
+                          Reactivate
                         </button>
                       </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ================= 5. SYSTEM AUDIT TRAIL ================= */}
-          {activeSection === "audit" && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-lg sm:text-xl font-bold text-slate-100 tracking-tight">
-                  Cryptographic System-Wide Audit Log
-                </h2>
-                <p className="text-xs sm:text-sm text-slate-400">
-                  Immutable forensic audit trail compliant with Section 65B Indian Evidence Act.
-                </p>
-              </div>
-
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm">
-                <div className="divide-y divide-slate-800">
-                  {auditLogs.map((log) => (
-                    <div key={log._id} className="p-4 hover:bg-slate-850/40 transition-colors">
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-1.5">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-bold text-xs text-slate-100">{log.user_name || log.officerName || "SYSTEM"}</span>
-                          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-950 text-amber-400 border border-slate-800">
-                            {log.user_role || log.officerRole || "SYSTEM"}
-                          </span>
-                          <span className="font-mono text-[10px] px-1.5 py-0.2 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                            {log.action || log.actionType}
-                          </span>
-                        </div>
-                        <span className="font-mono text-[11px] text-slate-400">
-                          {new Date(log.timestamp).toLocaleString()}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-300 mb-1">{log.details}</p>
-                      <div className="flex items-center gap-3 text-[10px] font-mono text-slate-400">
-                        <span>Fingerprint: <strong className="text-slate-400">{log.digital_hash || log.digitalHash}</strong></span>
-                        {log.case_id && <span>Case: {log.case_id}</span>}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
 
           {/* ================= 6. ALL CASES OVERVIEW ================= */}
+          {/* ================= 6b. HANDOVER & MIGRATION (Phase 6 Req27/28) ================= */}
+          {activeSection === "migration" && <MigrationPanel onChanged={loadData} />}
+
           {activeSection === "cases" && (
             <div className="space-y-6">
               <div>
@@ -996,18 +681,42 @@ export const AdminPortal: React.FC = () => {
                   Registered Criminal Interdiction Operations
                 </h2>
                 <p className="text-xs sm:text-sm text-slate-400">
-                  Overview of all active multi-agency investigations.
+                  Overview of all active multi-agency investigations. Transferred cases land in{" "}
+                  <strong className="text-slate-200">Yet to be Assigned</strong> until a Lead Investigator is provisioned.
                 </p>
               </div>
 
+              <div className="flex gap-1 p-1 rounded-xl bg-slate-950 border border-slate-800 w-fit">
+                {(["all", "unassigned"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setCaseFilter(f)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                      caseFilter === f ? "bg-indigo-500/15 text-indigo-300 border border-indigo-500/30" : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    {f === "all" ? `All cases (${cases.length})` : `Yet to be Assigned (${cases.filter((c) => (c.leadCount || 0) === 0).length})`}
+                  </button>
+                ))}
+              </div>
+
+              <RegisterCaseInline onRegistered={loadData} />
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {cases.map((c) => (
+                {cases
+                  .filter((c) => (caseFilter === "unassigned" ? (c.leadCount || 0) === 0 : true))
+                  .map((c) => (
                   <div key={c.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3 shadow-sm">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <span className="font-mono text-[11px] font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/30 uppercase">
                           {c.codeName}
                         </span>
+                        {(c.leadCount || 0) === 0 && (
+                          <span className="ml-1.5 font-mono text-[10px] font-bold text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded border border-rose-500/40 uppercase">
+                            Yet to be assigned
+                          </span>
+                        )}
                         <h3 className="font-bold text-sm text-slate-100 mt-2">{c.name}</h3>
                       </div>
                       <span className="text-xs font-mono text-slate-400">{c.date}</span>
@@ -1017,18 +726,27 @@ export const AdminPortal: React.FC = () => {
                       {c.description}
                     </p>
 
-                    <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
-                      <span>Agency: <strong className="text-slate-300">{c.leadAgency}</strong></span>
-                      <button
-                        onClick={() => {
-                          setSelectedCaseId(c.id);
-                          setActiveSection("case_access");
-                        }}
-                        className="text-indigo-400 hover:text-indigo-300 font-semibold"
-                      >
-                        Manage Team →
-                      </button>
-                    </div>
+                    {(c.handover || c.migration || c.importedFrom) && (
+                      <div className="rounded-xl bg-indigo-500/5 border border-indigo-500/25 p-2.5 text-[11px] space-y-0.5">
+                        <div className="text-slate-300">
+                          <strong>Originating agency:</strong> {c.handover?.from || c.migration?.from || "Archive import"}
+                        </div>
+                        <div className="text-slate-400 font-mono text-[10px]">
+                          {(c.handover || c.migration) && (
+                            <>Memo/Order: {c.handover?.orderRef || c.migration?.orderRef}{c.handover?.reason ? ` — ${c.handover.reason}` : ""}</>
+                          )}
+                          {c.importedFrom && <>Imported from container {c.importedFrom}</>}
+                        </div>
+                      </div>
+                    )}
+
+                    <AssignLeadInline
+                      caseId={c.id}
+                      hasLead={(c.leadCount || 0) > 0}
+                      leads={users.filter((u: any) => String(u.role).endsWith("_LEAD") && u.status === "ACTIVE")}
+                      agency={c.leadAgency}
+                      onAssigned={loadData}
+                    />
                   </div>
                 ))}
               </div>

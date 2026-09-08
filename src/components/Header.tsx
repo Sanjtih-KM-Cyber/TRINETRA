@@ -22,14 +22,14 @@ import {
   FolderArchive,
   LogOut,
 } from "lucide-react";
-import { CaseDataset, CrimeNetworkNode, InvestigatorProfile } from "../types";
+import { CaseDataset, CrimeNetworkNode, InvestigatorProfile, WorkstationTab } from "../types";
 
 interface HeaderProps {
   currentCase: CaseDataset;
   allCases: CaseDataset[];
   onSelectCase: (c: CaseDataset) => void;
-  activeTab: "overview" | "graph" | "analytics" | "patterns" | "geo" | "ingest";
-  onTabChange: (tab: "overview" | "graph" | "analytics" | "patterns" | "geo" | "ingest") => void;
+  activeTab: WorkstationTab;
+  onTabChange: (tab: WorkstationTab) => void;
   onOpenDossier: () => void;
   onOpenCopilot: () => void;
   onOpenNewCase: () => void;
@@ -114,14 +114,18 @@ export const Header: React.FC<HeaderProps> = ({
         return "Command Overview";
       case "graph":
         return "Graph Workstation";
-      case "analytics":
-        return "Centrality & Disruption";
       case "patterns":
-        return "Threat Radar";
+        return "Threat Patterns & Leads";
       case "geo":
         return "Geospatial Matrix";
       case "ingest":
         return "Case Ingestion";
+      case "proceedings":
+        return "Investigation Proceedings";
+      case "staging":
+        return "Intake & Approval Pipeline";
+      case "cyber":
+        return "Cyber Crime Cell";
       default:
         return "Intelligence Workstation";
     }
@@ -129,7 +133,10 @@ export const Header: React.FC<HeaderProps> = ({
 
   return (
     <>
-      <header className="h-14 sm:h-16 bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80 px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-4 sticky top-0 z-30 shrink-0 select-none">
+      <header
+        className="h-14 sm:h-16 bg-slate-950/90 backdrop-blur-md border-b px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-4 sticky top-0 z-30 shrink-0 select-none"
+        style={{ borderColor: "color-mix(in srgb, var(--dept-accent) 35%, #1e293b)" }}
+      >
         {/* Left: Mobile Menu Trigger + Tab Title */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           {/* Mobile Hamburger Button */}

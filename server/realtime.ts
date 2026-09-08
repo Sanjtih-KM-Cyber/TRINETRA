@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { Server } from "http";
 import { verifyToken } from "./auth";
 import { db } from "./db";
+import { isAdmin } from "../src/data/roles";
 
 interface ClientConnection {
   ws: WebSocket;
@@ -70,7 +71,7 @@ export function initWebSocketServer(server: Server): WebSocketServer {
       clients.delete(ws);
     });
 
-    ws.send(JSON.stringify({ type: "CONNECTED", message: "CRIM-INTEL Realtime Link Established" }));
+    ws.send(JSON.stringify({ type: "CONNECTED", message: "TRINETRA Realtime Link Established" }));
   });
 
   return wss;
@@ -101,7 +102,7 @@ export function broadcastCaseUpdate(caseId: string, payload: {
 
   for (const [ws, client] of clients.entries()) {
     if (ws.readyState === WebSocket.OPEN) {
-      if (client.subscribedCases.has(caseId) || client.userRole === "ADMIN" || client.subscribedCases.size === 0) {
+      if (client.subscribedCases.has(caseId) || isAdmin(client.userRole) || client.subscribedCases.size === 0) {
         ws.send(eventMessage);
       }
     }

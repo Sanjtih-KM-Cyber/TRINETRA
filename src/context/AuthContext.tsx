@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { UserAccount, UserRole, CaseDataset, RealtimeCaseUpdate } from "../types";
 import { authApi, getStoredToken, caseApi, createCaseWebSocket } from "../services/api";
+import { vpnApi } from "../services/vpn";
 
 interface AuthContextType {
   user: UserAccount | null;
@@ -8,7 +9,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   authorizedCases: any[];
-  login: (identifier: string, pass: string) => Promise<void>;
+  login: (identifier: string, pass: string, otp?: string) => Promise<void>;
   logout: () => Promise<void>;
   requestAccess: (formData: any) => Promise<{ success: boolean; message: string }>;
   refreshUser: () => Promise<void>;
@@ -74,10 +75,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [user]);
 
-  const login = async (identifier: string, pass: string) => {
+  const login = async (identifier: string, pass: string, otp?: string) => {
     setIsLoading(true);
     try {
-      const res = await authApi.login(identifier, pass);
+      // Phase 1 — tunnel-handshake OTP travels with badge + PIN to /api/auth/login.
+      const res = await authApi.login(identifier, pass, otp);
       setUser(res.user);
       setToken(res.token);
       setAuthorizedCases(res.authorized_cases || []);
@@ -86,6 +88,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  // Sign-out tears down the VPN tunnel too, so the officer always lands
+  // back on the tunnel gateway screen (Screen 1) after logging out.
   const logout = async () => {
     try {
       await authApi.logout();
@@ -93,6 +97,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(null);
       setToken(null);
       setAuthorizedCases([]);
+      await vpnApi.disconnect().catch(() => undefined);
+      window.location.reload();
     }
   };
 

@@ -50,16 +50,18 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
   });
 
   const getRoleBadge = (role?: UserRole) => {
-    switch (role) {
-      case "ADMIN":
-        return { label: "System Administrator", color: "bg-purple-500/20 text-purple-300 border-purple-500/40" };
-      case "LEAD_INVESTIGATOR":
-        return { label: "Lead Investigator", color: "bg-amber-500/20 text-amber-300 border-amber-500/40" };
-      case "FORENSIC_INVESTIGATOR":
-        return { label: "Forensic Investigator", color: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40" };
-      default:
-        return { label: role || "Officer", color: "bg-slate-500/20 text-slate-300 border-slate-500/40" };
-    }
+    if (!role) return { label: "Officer", color: "bg-slate-500/20 text-slate-300 border-slate-500/40" };
+    if (role.endsWith("_ADMIN"))
+      return { label: `${role} · Dept Admin`, color: "bg-purple-500/20 text-purple-300 border-purple-500/40" };
+    if (role.endsWith("_LEAD"))
+      return { label: `${role} · Lead`, color: "bg-amber-500/20 text-amber-300 border-amber-500/40" };
+    if (role.endsWith("_CYBER"))
+      return { label: `${role} · Cyber`, color: "bg-cyan-500/20 text-cyan-300 border-cyan-500/40" };
+    if (role.endsWith("_FORENSIC"))
+      return { label: `${role} · Forensic`, color: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40" };
+    if (role.endsWith("_FIELD"))
+      return { label: `${role} · Field`, color: "bg-blue-500/20 text-blue-300 border-blue-500/40" };
+    return { label: role, color: "bg-slate-500/20 text-slate-300 border-slate-500/40" };
   };
 
   const activeOfficerBadge = getRoleBadge(currentOfficer.role);
@@ -323,15 +325,15 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
         </div>
       )}
 
-      {/* Tab 3: Statutory RBAC Matrix (3 Real Roles Only) */}
+      {/* Tab 3: Statutory RBAC Matrix (canonical functionals × dept tenants) */}
       {activeTab === "matrix" && (
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-mono font-bold text-slate-200 uppercase tracking-wider">
-              Statutory Law Enforcement Access Control Matrix (CRIM-INTEL Standard)
+              Statutory Law Enforcement Access Control Matrix (TRINETRA Standard)
             </h3>
             <span className="text-[10px] font-mono text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded">
-              3 AUTHORIZED ROLES ONLY
+              CBI / NIA / CID / POLICE × ADMIN-LEAD-CYBER-FORENSIC-FIELD
             </span>
           </div>
 
@@ -350,26 +352,44 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
               <tbody className="divide-y divide-slate-800">
                 {[
                   {
-                    role: "ADMIN",
-                    desc: "System & User Access Controller",
+                    role: "*_ADMIN (dept-scoped)",
+                    desc: "CBI/NIA/CID/POLICE(STATE) Admin · same-tenure only",
                     manageUsers: true,
                     copilot: true,
                     confirmNodes: true,
-                    ingest: true,
-                    signDossier: true,
+                    ingest: false,
+                    signDossier: false,
                   },
                   {
-                    role: "LEAD_INVESTIGATOR",
-                    desc: "Superintendent / IO Lead",
+                    role: "*_LEAD",
+                    desc: "DySP/Inspector/SHO command · SAHAYAK, no ingest",
                     manageUsers: false,
                     copilot: true,
                     confirmNodes: true,
-                    ingest: true,
+                    ingest: false,
                     signDossier: true,
                   },
                   {
-                    role: "FORENSIC_INVESTIGATOR",
-                    desc: "Digital Evidence & CDR Tech",
+                    role: "*_CYBER",
+                    desc: "Digital forensics / OSINT / crypto trails",
+                    manageUsers: false,
+                    copilot: true,
+                    confirmNodes: false,
+                    ingest: true,
+                    signDossier: false,
+                  },
+                  {
+                    role: "*_FORENSIC",
+                    desc: "CFSL/FSL uploads only · minimal portal",
+                    manageUsers: false,
+                    copilot: false,
+                    confirmNodes: false,
+                    ingest: true,
+                    signDossier: false,
+                  },
+                  {
+                    role: "POLICE_FIELD / *_FIELD",
+                    desc: "Beat/station field capture · mobile uploads",
                     manageUsers: false,
                     copilot: false,
                     confirmNodes: false,

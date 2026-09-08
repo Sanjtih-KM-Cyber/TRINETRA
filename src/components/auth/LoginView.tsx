@@ -1,5 +1,9 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useAuth } from "../../context/AuthContext";
+import { vpnApi, isDemoMode } from "../../services/vpn";
+import type { UserRole } from "../../data/roles";
+import { REQUESTABLE_ROLES, KNOWN_STATES, orgOf } from "../../data/roles";
+import { detectGovTenant } from "../../data/departments";
 import {
   Shield,
   Lock,
@@ -15,7 +19,6 @@ import {
   Briefcase,
   Layers,
   FileCheck,
-  ChevronRight,
   ShieldAlert,
   Clock,
   Sparkles,
@@ -27,10 +30,18 @@ export const LoginView: React.FC = () => {
   const { login, requestAccess } = useAuth();
   const [viewMode, setViewMode] = useState<"signin" | "request">("signin");
 
-  // Sign in form state
+  // Sign in form state (Phase 1: badge + PIN + tunnel-handshake OTP)
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState(() => {
+    try {
+      return sessionStorage.getItem("crim_intel_vpn_otp") || "";
+    } catch {
+      return "";
+    }
+  });
   const [showPassword, setShowPassword] = useState(false);
+  const [idleSecondsLeft, setIdleSecondsLeft] = useState(120);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [accountStatusNotice, setAccountStatusNotice] = useState<{
     status: "PENDING" | "REJECTED" | "SUSPENDED";
@@ -47,7 +58,8 @@ export const LoginView: React.FC = () => {
   // 2. ORGANIZATION
   const [reqAgency, setReqAgency] = useState("");
   const [reqDepartment, setReqDepartment] = useState("");
-  const [reqRole, setReqRole] = useState<"LEAD_INVESTIGATOR" | "FORENSIC_INVESTIGATOR" | "INVESTIGATOR">("LEAD_INVESTIGATOR");
+  const [reqRole, setReqRole] = useState<UserRole>("CBI_LEAD");
+  const [reqState, setReqState] = useState<string>("MAHARASHTRA");
 
   // 3. ACCESS JUSTIFICATION
   const [reqReason, setReqReason] = useState("");
@@ -68,11 +80,41 @@ export const LoginView: React.FC = () => {
     badgeId: string;
     agency: string;
     department: string;
-    requestedRole: "LEAD_INVESTIGATOR" | "FORENSIC_INVESTIGATOR" | "INVESTIGATOR";
+    requestedRole: UserRole;
+    state?: string;
     timestamp: string;
   } | null>(null);
 
-  const isSignInFormValid = identifier.trim().length > 0 && password.length > 0;
+  const isSignInFormValid =
+    identifier.trim().length > 0 && password.length > 0 && /^\d{6}$/.test(otp);
+
+  // Phase 1 Req4 — idle timer on the Officer Sign-In screen: 2 min of no
+  // mouse/keyboard/touch activity tears down the tunnel and routes back to
+  // the VPN gateway (App re-probes vpnApi.status() after reload).
+  const idleTimerRef = useRef<number | null>(null);
+  const idleCountdownRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (viewMode !== "signin" || submissionReceipt) return;
+    setIdleSecondsLeft(120);
+    const reset = () => setIdleSecondsLeft(120);
+    const events: Array<keyof WindowEventMap> = ["mousemove", "mousedown", "keydown", "touchstart", "wheel"];
+    events.forEach((ev) => window.addEventListener(ev, reset, { passive: true }));
+    idleCountdownRef.current = window.setInterval(() => {
+      setIdleSecondsLeft((prev) => {
+        if (prev <= 1) {
+          if (idleCountdownRef.current) window.clearInterval(idleCountdownRef.current);
+          vpnApi.disconnect().finally(() => window.location.reload());
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => {
+      events.forEach((ev) => window.removeEventListener(ev, reset));
+      if (idleCountdownRef.current) window.clearInterval(idleCountdownRef.current);
+      if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
+    };
+  }, [viewMode, submissionReceipt]);
 
   const passwordsMatch = reqPassword.length > 0 && reqPassword === reqConfirmPassword;
   const isPasswordValid = reqPassword.length >= 6;
@@ -95,9 +137,18 @@ export const LoginView: React.FC = () => {
     setAccountStatusNotice(null);
 
     try {
-      await login(identifier.trim(), password);
+      await login(identifier.trim(), password, otp);
     } catch (err: any) {
       const status = err.data?.status;
+      // Wrong-OTP lockout: tunnel is torn down and the officer returns to it.
+      if (status === "LOCKED" || err.message?.toLowerCase().includes("locked")) {
+        setLoginError(
+          err.message || "Account locked after repeated wrong OTP attempts. Contact your department Admin."
+        );
+        await vpnApi.disconnect().catch(() => undefined);
+        setTimeout(() => window.location.reload(), 2500);
+        return;
+      }
       if (status === "PENDING" || err.message?.toLowerCase().includes("pending")) {
         setAccountStatusNotice({
           status: "PENDING",
@@ -143,6 +194,7 @@ export const LoginView: React.FC = () => {
     setReqError(null);
 
     try {
+      const isPoliceRole = orgOf(reqRole) === "POLICE";
       const res: any = await requestAccess({
         full_name: reqFullName.trim(),
         official_id: reqBadgeId.trim(),
@@ -151,6 +203,7 @@ export const LoginView: React.FC = () => {
         designation: "Investigative Officer",
         department: reqDepartment.trim(),
         requested_role: reqRole,
+        state: isPoliceRole ? reqState : undefined,
         reason_for_access: reqReason.trim() || "Operational syndicate network analysis, evidence ingestion, and case collaboration.",
         password: reqPassword,
       });
@@ -167,6 +220,7 @@ export const LoginView: React.FC = () => {
         agency: reqAgency.trim(),
         department: reqDepartment.trim(),
         requestedRole: reqRole,
+        state: orgOf(reqRole) === "POLICE" ? reqState : undefined,
         timestamp: new Date().toLocaleString("en-IN", {
           year: "numeric",
           month: "short",
@@ -213,7 +267,7 @@ export const LoginView: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <span className="font-bold text-sm sm:text-base tracking-tight text-slate-100">
-                CRIM-INTEL OS
+                TRINETRA OS
               </span>
               <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-slate-900 border border-slate-750 text-amber-400 font-semibold uppercase tracking-wider">
                 RESTRICTED GOV ACCESS
@@ -291,12 +345,9 @@ export const LoginView: React.FC = () => {
                 </div>
                 <div>
                   <span className="text-slate-400 block text-[11px]">Requested Role</span>
-                  <span className="text-xs font-semibold text-slate-200">
-                    {submissionReceipt.requestedRole === "LEAD_INVESTIGATOR"
-                      ? "Lead Investigator"
-                      : submissionReceipt.requestedRole === "FORENSIC_INVESTIGATOR"
-                      ? "Forensic Investigator"
-                      : "Investigator / Inspector"}
+                  <span className="text-xs font-semibold text-slate-200 font-mono">
+                    {submissionReceipt.requestedRole}
+                    {submissionReceipt.state ? ` · ${submissionReceipt.state}` : ""}
                   </span>
                 </div>
                 <div>
@@ -330,13 +381,39 @@ export const LoginView: React.FC = () => {
         ) : viewMode === "signin" ? (
           /* ================= 2. OFFICER SIGN IN VIEW ================= */
           <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 animate-in fade-in duration-150">
+            {/* Phase 1 Req3 — in-flow tabs inside the Login view */}
+            <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-slate-950 border border-slate-800 mb-6">
+              <button
+                type="button"
+                onClick={() => setViewMode("signin")}
+                className="px-3 py-2 rounded-lg text-xs font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30"
+              >
+                Officer Sign-In
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setViewMode("request");
+                  setLoginError(null);
+                  setAccountStatusNotice(null);
+                  setReqError(null);
+                }}
+                className="px-3 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                Request Access
+              </button>
+            </div>
             <div className="mb-6 text-center">
               <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 mb-3">
                 <Lock className="w-5 h-5" />
               </div>
               <h2 className="text-xl font-bold text-slate-100 tracking-tight">Officer Sign In</h2>
               <p className="text-xs text-slate-400 mt-1">
-                Authenticate with your authorized government credentials.
+                Badge + PIN + tunnel-handshake OTP (issued on the VPN screen).
+              </p>
+              <p className="text-[11px] font-mono text-slate-500 mt-1.5 flex items-center justify-center gap-1">
+                <Clock className="w-3 h-3" />
+                Idle reset in {Math.floor(idleSecondsLeft / 60)}:{String(idleSecondsLeft % 60).padStart(2, "0")} → VPN gateway
               </p>
             </div>
 
@@ -379,6 +456,24 @@ export const LoginView: React.FC = () => {
                 >
                   Official Email / Badge ID <span className="text-amber-400">*</span>
                 </label>
+                {(() => {
+                  const detected = detectGovTenant(identifier.trim());
+                  return detected ? (
+                    <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-mono">
+                      <span
+                        className="px-2 py-0.5 rounded border font-bold"
+                        style={{
+                          borderColor: `${detected.department.accentColor}66`,
+                          color: detected.department.accentColor,
+                        }}
+                      >
+                        {detected.department.shortName}
+                        {detected.state ? ` · ${detected.state}` : ""}
+                      </span>
+                      <span className="text-slate-500">dept resolved from gov-ID prefix</span>
+                    </div>
+                  ) : null;
+                })()}
                 <div className="relative">
                   <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                   <input
@@ -391,7 +486,7 @@ export const LoginView: React.FC = () => {
                       setIdentifier(e.target.value);
                       if (loginError) setLoginError(null);
                     }}
-                    placeholder="e.g. officer@agency.gov.in or BADGE-ID"
+                    placeholder="e.g. CBI-LEAD-210 or rao@cbi.gov.in"
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 focus:border-amber-500 font-mono transition-colors"
                   />
                 </div>
@@ -430,6 +525,41 @@ export const LoginView: React.FC = () => {
                 </div>
               </div>
 
+              <div>
+                <label
+                  htmlFor="tunnel-otp"
+                  className="block text-xs font-semibold text-slate-300 mb-1.5"
+                >
+                  Tunnel OTP <span className="text-amber-400">*</span>
+                  <span className="ml-1 font-normal text-slate-500">6-digit code from VPN handshake</span>
+                </label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    id="tunnel-otp"
+                    type="text"
+                    required
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={otp}
+                    onChange={(e) => {
+                      setOtp(e.target.value.replace(/\D/g, "").slice(0, 6));
+                      if (loginError) setLoginError(null);
+                    }}
+                    placeholder="000000"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 focus:border-amber-500 font-mono tracking-[0.35em] transition-colors"
+                  />
+                </div>
+              </div>
+
+              {isDemoMode() && (
+                <p className="text-[11px] font-mono text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded-lg p-2">
+                  Demo — admin@cbi.gov.in / Admin@123 · rao@cbi.gov.in / Lead@123 · cid_cyber_01@cid.gov.in / Agency@123 · patil@mahapolice.gov.in / Lead@123
+                  <span className="block mt-1 text-slate-400">Paste the 6-digit OTP from the VPN tunnel screen. 5 wrong OTPs lock the account.</span>
+                </p>
+              )}
+
               <button
                 type="submit"
                 disabled={isSubmitting || !isSignInFormValid}
@@ -448,26 +578,30 @@ export const LoginView: React.FC = () => {
                 )}
               </button>
             </form>
-
-            <div className="mt-6 pt-5 border-t border-slate-800 text-center">
-              <button
-                type="button"
-                onClick={() => {
-                  setViewMode("request");
-                  setLoginError(null);
-                  setAccountStatusNotice(null);
-                  setReqError(null);
-                }}
-                className="text-xs text-amber-400 hover:text-amber-300 font-semibold transition-colors inline-flex items-center gap-1 group"
-              >
-                <span>Request Access</span>
-                <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
-              </button>
-            </div>
           </div>
         ) : (
           /* ================= 3. REQUEST ACCESS VIEW ================= */
           <div className="w-full max-w-xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 animate-in fade-in duration-150">
+            {/* Phase 1 Req3 — same in-flow tabs on the request side */}
+            <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-slate-950 border border-slate-800 mb-6">
+              <button
+                type="button"
+                onClick={() => {
+                  setViewMode("signin");
+                  setReqError(null);
+                }}
+                className="px-3 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                Officer Sign-In
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("request")}
+                className="px-3 py-2 rounded-lg text-xs font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30"
+              >
+                Request Access
+              </button>
+            </div>
             <div className="mb-6 flex items-start justify-between gap-4 pb-4 border-b border-slate-800">
               <div>
                 <h2 className="text-lg font-bold text-slate-100 tracking-tight">
@@ -545,7 +679,7 @@ export const LoginView: React.FC = () => {
                       required
                       value={reqBadgeId}
                       onChange={(e) => setReqBadgeId(e.target.value)}
-                      placeholder="e.g. NCB-SIT-774"
+                      placeholder="e.g. cbi_lead_01 / police_kar_lead"
                       className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono transition-colors"
                     />
                   </div>
@@ -570,7 +704,7 @@ export const LoginView: React.FC = () => {
                       required
                       value={reqAgency}
                       onChange={(e) => setReqAgency(e.target.value)}
-                      placeholder="e.g. Narcotics Control Bureau"
+                      placeholder="e.g. Central Bureau of Investigation"
                       className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 transition-colors"
                     />
                   </div>
@@ -593,101 +727,58 @@ export const LoginView: React.FC = () => {
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-2">
                     Requested Operational Role <span className="text-amber-400">*</span>
+                    <span className="ml-1 font-normal text-slate-500">(CBI / NIA / CID / State Police)</span>
                   </label>
 
                   <div className="grid grid-cols-1 gap-2.5">
-                    {/* Role Option 1: Lead Investigator */}
-                    <label
-                      className={`p-3 rounded-xl border text-left cursor-pointer transition-all flex items-start gap-3 ${
-                        reqRole === "LEAD_INVESTIGATOR"
-                          ? "bg-amber-500/10 border-amber-500/40 text-slate-100 shadow-sm"
-                          : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="requested_role"
-                        value="LEAD_INVESTIGATOR"
-                        checked={reqRole === "LEAD_INVESTIGATOR"}
-                        onChange={() => setReqRole("LEAD_INVESTIGATOR")}
-                        className="mt-1 text-amber-500 focus:ring-amber-500"
-                      />
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-xs text-amber-300">
-                            LEAD INVESTIGATOR
-                          </span>
-                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-amber-400/80">
-                            COMMAND
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-400 mt-1 leading-normal">
-                          Investigation command, syndicate graph reasoning, threat alerts, case management, and AI Copilot.
-                        </p>
-                      </div>
-                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {REQUESTABLE_ROLES.map((value) => (
+                        <label
+                          key={value}
+                          className={`px-2.5 py-2 rounded-lg border text-[11px] cursor-pointer transition-all flex items-center gap-2 ${
+                            reqRole === value
+                              ? "bg-amber-500/10 border-amber-500/40 text-slate-100"
+                              : "bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700"
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="requested_role"
+                            value={value}
+                            checked={reqRole === value}
+                            onChange={() => setReqRole(value)}
+                            className="text-amber-500 focus:ring-amber-500"
+                          />
+                          <span className="font-semibold font-mono">{value}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-slate-500 font-mono">
+                      Gov-ID prefix drives tenant: cbi_ / nia_ / cid_ / police_kar_ / police_mah_. Use CID_CYBER for cid_cyber_01.
+                    </p>
 
-                    {/* Role Option 2: Forensic Investigator */}
-                    <label
-                      className={`p-3 rounded-xl border text-left cursor-pointer transition-all flex items-start gap-3 ${
-                        reqRole === "FORENSIC_INVESTIGATOR"
-                          ? "bg-emerald-500/10 border-emerald-500/40 text-slate-100 shadow-sm"
-                          : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="requested_role"
-                        value="FORENSIC_INVESTIGATOR"
-                        checked={reqRole === "FORENSIC_INVESTIGATOR"}
-                        onChange={() => setReqRole("FORENSIC_INVESTIGATOR")}
-                        className="mt-1 text-emerald-500 focus:ring-emerald-500"
-                      />
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-xs text-emerald-300">
-                            FORENSIC INVESTIGATOR
-                          </span>
-                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-emerald-400/80">
-                            LAB / INTAKE
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-400 mt-1 leading-normal">
-                          Digital evidence ingestion, cryptographic Section 65B hash verification, CDR/IMEI triangulation, and chain-of-custody.
+                    {orgOf(reqRole) === "POLICE" && (
+                      <div>
+                        <label htmlFor="req-state" className="block text-xs font-semibold text-slate-300 mb-1">
+                          State Jurisdiction <span className="text-amber-400">*</span>
+                        </label>
+                        <select
+                          id="req-state"
+                          value={reqState}
+                          onChange={(e) => setReqState(e.target.value)}
+                          className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                        >
+                          {KNOWN_STATES.map((s) => (
+                            <option key={s.code} value={s.code}>
+                              {s.label} ({s.code})
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-[11px] text-slate-500 mt-1">
+                          Karnataka and Maharashtra admins are fully isolated tenants.
                         </p>
                       </div>
-                    </label>
-
-                    {/* Role Option 3: Investigator / Inspector */}
-                    <label
-                      className={`p-3 rounded-xl border text-left cursor-pointer transition-all flex items-start gap-3 ${
-                        reqRole === "INVESTIGATOR"
-                          ? "bg-blue-500/10 border-blue-500/40 text-slate-100 shadow-sm"
-                          : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="requested_role"
-                        value="INVESTIGATOR"
-                        checked={reqRole === "INVESTIGATOR"}
-                        onChange={() => setReqRole("INVESTIGATOR")}
-                        className="mt-1 text-blue-500 focus:ring-blue-500"
-                      />
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-xs text-blue-300">
-                            INVESTIGATOR / INSPECTOR
-                          </span>
-                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-blue-400/80">
-                            FIELD / SIGHTINGS
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-400 mt-1 leading-normal">
-                          Collects and submits field information, suspect sightings, surveillance logs, vehicle tracking, and informant reports.
-                        </p>
-                      </div>
-                    </label>
+                    )}
 
                     {/* Policy note regarding Admin Role */}
                     <div className="p-2.5 rounded-xl bg-slate-950/40 border border-slate-800/80 text-[11px] text-slate-400 flex items-start gap-2">
@@ -695,7 +786,7 @@ export const LoginView: React.FC = () => {
                       <div>
                         <span className="font-semibold text-slate-300">ADMIN PRIVILEGES: </span>
                         <span>
-                          Account approval, role assignment, and security governance are provisioned strictly by existing System Administrators.
+                          CBI/NIA/CID/State-Police Admin roles are provisioned strictly by existing department Admins within the same tenant.
                         </span>
                       </div>
                     </div>
@@ -838,7 +929,7 @@ export const LoginView: React.FC = () => {
 
       {/* Clean Enterprise Footer */}
       <footer className="border-t border-slate-850 bg-slate-950/95 backdrop-blur-md px-4 sm:px-8 py-3 text-xs text-slate-400 flex flex-col sm:flex-row items-center justify-between gap-2 z-10 shrink-0">
-        <span>CRIM-INTEL OS • Restricted to Authorized Law Enforcement Personnel</span>
+        <span>TRINETRA OS • Restricted to Authorized Law Enforcement Personnel</span>
         <span className="font-mono text-[11px] text-slate-400">
           Section 65B Indian Evidence Act Compliant
         </span>

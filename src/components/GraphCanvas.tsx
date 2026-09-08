@@ -17,6 +17,8 @@ import {
   ZoomIn,
   ZoomOut,
   Maximize2,
+  Minimize2,
+  Expand,
   RefreshCw,
   Search,
   Filter,
@@ -102,6 +104,21 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
   // Hover state: Focused node ID when mouse hovers over a node or label
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+
+  // Phase 7 Req31 — viewport expansion toggle.
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => undefined);
+    } else {
+      containerRef.current?.requestFullscreen?.().catch(() => undefined);
+    }
+  };
 
   // Neighbor lookup map for instant O(1) connection testing
   const neighborMap = useMemo(() => {
@@ -418,6 +435,8 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     canvasSimNodesRef.current = simNodes;
     canvasSimLinksRef.current = simLinks;
 
+    // Phase 7 Req29 — overlap-free layout: longer links, stronger repulsion,
+    // padded collision envelopes, axis gravity + viewport margin clamp on tick.
     const simulation = d3
       .forceSimulation(simNodes)
       .force(
@@ -425,11 +444,13 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         d3
           .forceLink<CrimeNetworkNode & d3.SimulationNodeDatum, any>(simLinks)
           .id((d) => d.id)
-          .distance((d) => (d.weight ? 140 / d.weight : 110))
+          .distance((d) => (d.weight ? 200 / d.weight : 160))
       )
-      .force("charge", d3.forceManyBody().strength(-300))
+      .force("charge", d3.forceManyBody().strength(-520).distanceMax(600))
       .force("center", d3.forceCenter(0, 0))
-      .force("collision", d3.forceCollide<CrimeNetworkNode>().radius((d) => getNodeRadius(d) + 16));
+      .force("x", d3.forceX(0).strength(0.06))
+      .force("y", d3.forceY(0).strength(0.06))
+      .force("collision", d3.forceCollide<CrimeNetworkNode>().radius((d) => getNodeRadius(d) + 30).strength(0.9).iterations(3));
 
     simulationRef.current = simulation;
     canvasSimRef.current = simulation;
@@ -437,7 +458,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     // Build initial spatial index
     const buildSpatialIndex = (nodes: (CrimeNetworkNode & d3.SimulationNodeDatum)[]): { index: Map<string, (CrimeNetworkNode & d3.SimulationNodeDatum)[]>; cellSize: number } => {
       const index = new Map<string, (CrimeNetworkNode & d3.SimulationNodeDatum)[]>();
-      const maxRadius = Math.max(...nodes.map(getNodeRadius), 10);
+      const maxRadius = Math.max(...nodes.map((nd) => getNodeRadius(nd)), 10);
       const effectiveCellSize = Math.max(100, maxRadius * 2.5);
       
       nodes.forEach((node) => {
@@ -633,15 +654,21 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         ctx.strokeStyle = isHovered || isSelected ? "#38bdf8" : node.isCutVertex ? "#a855f7" : "rgba(15, 23, 42, 0.9)";
         ctx.stroke();
 
-        // Node Label (Always shown for hovered node & its direct neighbors; LOD for others)
+        // Node Label — Phase 7 Req29 typography: dark halo underlay so labels
+        // stay legible where nodes cluster (always shown for hovered node &
+        // its direct neighbors; LOD for others).
         if (isHovered || (activeHoverId && isDirectNeighbor) || isKingpin || isSelected || transform.k > 0.6) {
           ctx.font = `${isKingpin || isHovered ? "bold 11px" : "10px"} sans-serif`;
-          ctx.fillStyle = isHovered ? "#38bdf8" : isDirectNeighbor && activeHoverId ? "#f1f5f9" : "#ffffff";
           ctx.textAlign = "center";
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = "rgba(2, 6, 23, 0.9)";
+          ctx.strokeText(node.label, node.x, node.y + r + 12);
+          ctx.fillStyle = isHovered ? "#38bdf8" : isDirectNeighbor && activeHoverId ? "#f1f5f9" : "#ffffff";
           ctx.fillText(node.label, node.x, node.y + r + 12);
 
           if (node.role && (isHovered || transform.k > 0.9)) {
             ctx.font = "8px monospace";
+            ctx.strokeText(node.role, node.x, node.y + r + 22);
             ctx.fillStyle = isHovered ? "#bae6fd" : "rgba(148, 163, 184, 0.85)";
             ctx.fillText(node.role, node.x, node.y + r + 22);
           }
@@ -655,17 +682,21 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
     canvasRenderRef.current = render;
 
-    // Cache simulated coordinates on every tick
+    // Cache simulated coordinates on every tick (Phase 7 Req29 — margin clamp).
+    const MARGIN = 90;
     simulation.on("tick", () => {
       simNodes.forEach((n) => {
         if (n.x !== undefined && n.y !== undefined) {
+          const r = getNodeRadius(n as CrimeNetworkNode);
+          n.x = Math.max(-width / 2 + MARGIN + r, Math.min(width / 2 - MARGIN - r, n.x));
+          n.y = Math.max(-height / 2 + MARGIN + r, Math.min(height / 2 - MARGIN - r, n.y));
           nodePositionsRef.current.set(n.id, { x: n.x, y: n.y, vx: n.vx, vy: n.vy });
         }
       });
       // Update spatial index for O(1) hit-testing
       spatialIndexRef.current = (() => {
         const index = new Map<string, (CrimeNetworkNode & d3.SimulationNodeDatum)[]>();
-        const maxRadius = Math.max(...simNodes.map(getNodeRadius), 10);
+        const maxRadius = Math.max(...simNodes.map((nd) => getNodeRadius(nd)), 10);
         const effectiveCellSize = Math.max(100, maxRadius * 2.5);
         
         simNodes.forEach((node) => {
@@ -907,6 +938,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       target: typeof l.target === "object" ? (l.target as any).id : l.target,
     }));
 
+    // Phase 7 Req29 — SVG engine mirrors the canvas overlap-free layout.
     const simulation = d3
       .forceSimulation(simNodes)
       .force(
@@ -914,11 +946,13 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         d3
           .forceLink<CrimeNetworkNode & d3.SimulationNodeDatum, any>(simLinks)
           .id((d) => d.id)
-          .distance((d) => (d.weight ? 150 / d.weight : 110))
+          .distance((d) => (d.weight ? 200 / d.weight : 160))
       )
-      .force("charge", d3.forceManyBody().strength(-350))
+      .force("charge", d3.forceManyBody().strength(-520).distanceMax(600))
       .force("center", d3.forceCenter(0, 0))
-      .force("collision", d3.forceCollide<CrimeNetworkNode>().radius((d) => getNodeRadius(d) + 18));
+      .force("x", d3.forceX(0).strength(0.06))
+      .force("y", d3.forceY(0).strength(0.06))
+      .force("collision", d3.forceCollide<CrimeNetworkNode>().radius((d) => getNodeRadius(d) + 30).strength(0.9).iterations(3));
 
     // Render Links
     const linkGroup = g.append("g").attr("class", "links");
@@ -1122,9 +1156,16 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         onSelectNode(origNode);
       });
 
+    // Phase 7 Req29 — margin clamp keeps nodes clear of viewport edges.
+    const SVG_MARGIN = 90;
+    const svgW = (svgRef.current?.clientWidth || containerRef.current?.clientWidth || 900);
+    const svgH = (svgRef.current?.clientHeight || containerRef.current?.clientHeight || 650);
     simulation.on("tick", () => {
       simNodes.forEach((n) => {
         if (n.x !== undefined && n.y !== undefined) {
+          const r = getNodeRadius(n as CrimeNetworkNode);
+          n.x = Math.max(-svgW / 2 + SVG_MARGIN + r, Math.min(svgW / 2 - SVG_MARGIN - r, n.x));
+          n.y = Math.max(-svgH / 2 + SVG_MARGIN + r, Math.min(svgH / 2 - SVG_MARGIN - r, n.y));
           nodePositionsRef.current.set(n.id, { x: n.x, y: n.y, vx: n.vx, vy: n.vy });
         }
       });
@@ -1242,6 +1283,13 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
               title="Recenter Canvas"
             >
               <Maximize2 className="w-4 h-4" />
+            </button>
+            <button
+              onClick={toggleFullscreen}
+              className={`p-1.5 rounded-lg transition-colors ${isFullscreen ? "text-amber-300 bg-amber-500/15" : "text-slate-300 hover:text-white hover:bg-slate-800"}`}
+              title={isFullscreen ? "Exit full screen" : "Expand canvas full screen"}
+            >
+              {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Expand className="w-4 h-4" />}
             </button>
           </div>
         </div>

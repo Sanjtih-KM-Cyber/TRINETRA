@@ -147,15 +147,24 @@ export const AddEvidenceModal: React.FC<AddEvidenceModalProps> = ({
     const allNewFins: FinancialRecord[] = [];
     const newEvidenceRecords: EvidenceFileRecord[] = [];
 
-    const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB memory-safe chunk slices
+    const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB segments per TRINETRA streamer spec
+    const serverHashes: Record<string, string> = {};
 
     for (let i = 0; i < stagedFiles.length; i++) {
       const item = stagedFiles[i];
       const fileCategory = getFileCategory(item.name, item.type);
       const totalChunks = Math.max(1, Math.ceil(item.size / CHUNK_SIZE));
 
-      // 1. Streaming Chunk Transmission to Server (No multi-GB buffers in memory)
+      // 1. Streaming Chunk Transmission to Server (50MB segments; server
+      // reassembles on disk and returns the SHA-256 chain-of-custody digest).
       try {
+        const token = localStorage.getItem("crim_intel_token");
+        let vpn: string | null = null;
+        try {
+          vpn = sessionStorage.getItem("crim_intel_vpn");
+        } catch {
+          vpn = null;
+        }
         for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
           const start = chunkIdx * CHUNK_SIZE;
           const end = Math.min(item.size, start + CHUNK_SIZE);
@@ -163,10 +172,12 @@ export const AddEvidenceModal: React.FC<AddEvidenceModalProps> = ({
           const chunkBuffer = await chunkBlob.arrayBuffer();
 
           // Stream chunk to backend
-          await fetch("/api/upload-chunk", {
+          const res = await fetch("/api/upload-chunk", {
             method: "POST",
             headers: {
               "Content-Type": "application/octet-stream",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              ...(vpn ? { "X-VPN-Session": vpn } : {}),
               "x-file-id": item.id,
               "x-file-name": item.name,
               "x-chunk-index": chunkIdx.toString(),
@@ -175,6 +186,10 @@ export const AddEvidenceModal: React.FC<AddEvidenceModalProps> = ({
             },
             body: chunkBuffer,
           }).catch(() => null);
+          const done: any = await res?.json().catch(() => null);
+          if (done?.status === "COMPLETE" && done?.sha256) {
+            serverHashes[item.id] = done.sha256;
+          }
 
           // Update real-time chunk progress
           const fileProgress = (chunkIdx + 1) / totalChunks;
@@ -202,7 +217,8 @@ Forensic Seizure: Processed under Case ${caseTitle}. Handset IMEI / Call details
         textContent = `Seized Evidence Document: ${item.name}`;
       }
 
-      const fileHash = generateFileHash(textContent, item.name);
+      // Prefer the server-side SHA-256 of the reassembled file (chain-of-custody).
+      const fileHash = serverHashes[item.id] || generateFileHash(textContent, item.name);
 
       // Handle CSV vs Text
       if (fileCategory === "CDR_CSV" && textContent.includes(",")) {

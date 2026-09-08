@@ -1,7 +1,12 @@
 import { Router, Response } from "express";
 import { db } from "../db";
-import { authenticateToken, requireCaseMembership, requireRole, AuthenticatedRequest } from "../auth";
+import { authenticateToken, requireCaseMembership, requireRole, requireEditAccess, AuthenticatedRequest } from "../auth";
+import { ADMIN_ROLES, FIELD_ROLES } from "../../src/data/roles";
 import { processIngestionPipeline } from "../services/ingestionPipeline";
+
+// Phase 4 Req18 — field intake is the Field channel (+ADMIN oversight).
+// Leads requisition data instead of submitting observations directly.
+const FIELD_SUBMIT_ROLES = [...ADMIN_ROLES, ...FIELD_ROLES] as any[];
 
 const router = Router();
 
@@ -15,7 +20,7 @@ router.get("/:caseId/observations", requireCaseMembership, async (req: Authentic
 });
 
 // 2. Submit new Field Observation via Unified Ingestion Pipeline
-router.post("/:caseId/observations", requireCaseMembership, requireRole(["ADMIN", "LEAD_INVESTIGATOR", "INVESTIGATOR", "INSPECTOR"]), async (req: AuthenticatedRequest, res: Response) => {
+router.post("/:caseId/observations", requireCaseMembership, requireEditAccess, requireRole(FIELD_SUBMIT_ROLES), async (req: AuthenticatedRequest, res: Response) => {
   const { caseId } = req.params;
   const user = req.user!;
   const {
@@ -52,6 +57,8 @@ router.post("/:caseId/observations", requireCaseMembership, requireRole(["ADMIN"
       rawText: narrative,
       sourceAuthority: `${user.agency} Field Interdiction Unit`,
       summary: `Field observation '${title}' logged at ${locationName || "Field Location"} by Inspector ${user.name}.`,
+      // Field intake stages for Lead review — nothing reaches the graph directly.
+      stageOnly: true,
       observationMetadata: {
         observationType: observationType || "SUSPECT_SIGHTING",
         locationName: locationName || "Field Location",
@@ -67,7 +74,7 @@ router.post("/:caseId/observations", requireCaseMembership, requireRole(["ADMIN"
 
     res.status(201).json({
       success: true,
-      message: "Field observation successfully validated, processed, and integrated into canonical case dataset.",
+      message: "Field observation recorded and staged for Lead review — it appears in the Intake Pipeline in real time.",
       result,
     });
   } catch (err: any) {
@@ -76,7 +83,7 @@ router.post("/:caseId/observations", requireCaseMembership, requireRole(["ADMIN"
 });
 
 // 3. Submit Field Intelligence Report / Memo
-router.post("/:caseId/field-report", requireCaseMembership, requireRole(["ADMIN", "LEAD_INVESTIGATOR", "INVESTIGATOR", "INSPECTOR"]), async (req: AuthenticatedRequest, res: Response) => {
+router.post("/:caseId/field-report", requireCaseMembership, requireEditAccess, requireRole(FIELD_SUBMIT_ROLES), async (req: AuthenticatedRequest, res: Response) => {
   const { caseId } = req.params;
   const user = req.user!;
   const { title, reportType, textContent, locationName } = req.body;
@@ -101,11 +108,13 @@ router.post("/:caseId/field-report", requireCaseMembership, requireRole(["ADMIN"
       rawText: textContent,
       sourceAuthority: `${user.agency} Field Unit`,
       summary: `Field Report submitted by ${user.name} (${user.official_id}).`,
+      // Field intake stages for Lead review — nothing reaches the graph directly.
+      stageOnly: true,
     });
 
     res.status(201).json({
       success: true,
-      message: "Field report processed and candidate intelligence committed to case graph.",
+      message: "Field report recorded and staged for Lead review — it appears in the Intake Pipeline in real time.",
       result,
     });
   } catch (err: any) {

@@ -14,6 +14,7 @@ import {
 } from "../types";
 
 import { callLLMWithSchema, getActiveEngine, stripMarkdownCodeBlocks } from "./llmClient";
+import { GAZETTEER } from "../data/gazetteer";
 
 export interface ExtractionResult {
   nodes: CrimeNetworkNode[];
@@ -363,6 +364,43 @@ export function extractEntitiesRuleBased(
     });
   }
 
+  // 7. Gazetteer geocoding — known landmarks become LOCATION entities with map coordinates
+  const lowerText = text.toLowerCase();
+  for (const place of GAZETTEER) {
+    const hitName = place.names.find((n) => lowerText.includes(n));
+    if (!hitName) continue;
+    const hitIndex = lowerText.indexOf(hitName);
+    const lineIndex = text.substring(0, hitIndex).split("\n").length;
+    const snippet = lines[lineIndex - 1] || `Location mentioned: ${place.label}`;
+    registerNode({
+      id: `loc-${place.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
+      label: place.label,
+      type: "LOCATION",
+      category: "EVIDENCE",
+      reviewState: "NEEDS_REVIEW",
+      role: "Mentioned Location",
+      riskScore: 55,
+      confidence: 0.9,
+      details: {
+        address: place.label,
+        geo: { lat: place.lat, lng: place.lng, name: place.label },
+        notes: `Geocoded from gazetteer match "${hitName}" in ${sourceDocName}`,
+      },
+      sourceDocumentIds: [sourceDocId],
+      sourceSnippets: [
+        {
+          docId: sourceDocId,
+          docName: sourceDocName,
+          line: lineIndex,
+          locator: `Line ${lineIndex}`,
+          snippet,
+          confidence: 0.9,
+        },
+      ],
+    });
+    signals.push(`Geocoded location: ${place.label}`);
+  }
+
   // Duplicate resolution candidate detection (Page 2 & 12 of spec: do not blindly merge)
   nodes.forEach((nodeA, idxA) => {
     nodes.slice(idxA + 1).forEach((nodeB) => {
@@ -419,7 +457,7 @@ export async function extractEntitiesUniversal(
   }
 
   try {
-    const systemPrompt = `You are CRIM-INTEL, a specialized forensic intelligence extraction engine for Indian law enforcement.
+    const systemPrompt = `You are TRINETRA, a specialized forensic intelligence extraction engine for Indian law enforcement.
 Extract structured entities and relationships from criminal investigation documents (FIRs, CDRs, financial ledgers, intel reports).
 Focus on: Persons (accused, suspects, associates), Phones (with +91 format), IMEIs, Vehicles (Indian format), UPI/Bank accounts, Locations, Organizations.
 Return ONLY valid JSON matching the specified schema. No markdown, no commentary.`;

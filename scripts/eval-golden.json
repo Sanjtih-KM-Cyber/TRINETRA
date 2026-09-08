@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "caseId": "case-garuda",
+  "passThreshold": 0.7,
+  "cases": [
+    {
+      "id": "E01",
+      "question": "What are the remand limits for this case and when does default bail become available?",
+      "mustCite": ["167"],
+      "mustMention": ["60", "90", "default bail"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E02",
+      "question": "Are the CDR dumps admissible in court and what certificate do they need?",
+      "mustCite": [["65B", "Sec 63", "Section 63"]],
+      "mustMention": ["certificate", "electronic"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E03",
+      "question": "What arrest procedure must the team follow before picking up the next suspect?",
+      "mustCite": ["41A"],
+      "mustMention": ["notice", "grounds"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E04",
+      "question": "Which entities carry the highest risk in this network?",
+      "mustCite": [],
+      "mustMention": ["Singhania", "Merchant"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E05",
+      "question": "Trace the hawala money trail and mule accounts.",
+      "mustCite": [],
+      "mustMention": ["munshi", "hawala"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E06",
+      "question": "Can the absconding financier seek anticipatory bail and under what provision?",
+      "mustCite": ["438"],
+      "mustMention": ["anticipatory"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E07",
+      "question": "The seizure is 12kg MDMA — which NDPS provision applies and what is the commercial threshold?",
+      "mustCite": ["NDPS"],
+      "mustMention": ["21", "commercial"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E08",
+      "question": "The layering chain looks like money laundering — which PMLA sections apply?",
+      "mustCite": ["PMLA"],
+      "mustMention": ["laundering", "proceeds"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E09",
+      "question": "What must the charge sheet contain and which provision governs it?",
+      "mustCite": ["173"],
+      "mustMention": ["charge", "evidence"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E10",
+      "question": "What daily record must the IO maintain and under which section?",
+      "mustCite": ["172"],
+      "mustMention": ["diary"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E11",
+      "question": "What are the seizure memo requirements for the container interception?",
+      "mustCite": ["102"],
+      "mustMention": ["seizure", "witness"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E12",
+      "question": "What CDR and tower evidence supports the phone analysis, and is it admissible?",
+      "mustCite": [["65B", "Sec 63", "Section 63", "BSA"]],
+      "mustMention": ["IMEI", "CDR"],
+      "minConfidence": 0.5
+    },
+    {
+      "id": "E13",
+      "question": "What regular bail provisions apply to the arrested courier?",
+      "mustCite": ["437"],
+      "mustMention": ["bail", "magistrate"],
+      "minConfidence": 0.5
+    }
+  ]
+}

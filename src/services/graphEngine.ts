@@ -220,13 +220,13 @@ export function computeGraphAnalytics(
 
   // 4. PageRank Algorithm
   const pageRank = new Map<string, number>();
-  const initialPR = 1 / n;
+  const initialPR = nodeCount > 0 ? 1 / nodeCount : 0;
   nodeIds.forEach((id) => pageRank.set(id, initialPR));
   const damping = 0.85;
 
   for (let iter = 0; iter < 20; iter++) {
     const nextPR = new Map<string, number>();
-    nodeIds.forEach((id) => nextPR.set(id, (1 - damping) / n));
+    nodeIds.forEach((id) => nextPR.set(id, nodeCount > 0 ? (1 - damping) / nodeCount : 0));
 
     nodeIds.forEach((u) => {
       const neighbors = Array.from(adj.get(u) || []);
@@ -237,7 +237,7 @@ export function computeGraphAnalytics(
           nextPR.set(v, nextPR.get(v)! + share);
         });
       } else {
-        const share = (damping * pageRank.get(u)!) / n;
+        const share = nodeCount > 0 ? (damping * pageRank.get(u)!) / nodeCount : 0;
         nodeIds.forEach((v) => {
           nextPR.set(v, nextPR.get(v)! + share);
         });

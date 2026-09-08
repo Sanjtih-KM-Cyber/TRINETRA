@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   CaseDataset,
   CrimeNetworkNode,
@@ -8,6 +8,9 @@ import {
   CourtDossier,
   AuditLogEntry,
 } from "../types";
+import { useAuth } from "../context/AuthContext";
+import { caseApi } from "../services/api";
+import { agencyToDepartment } from "../data/departments";
 import { generateDossierWithGemini } from "../services/nlpExtractor";
 import { generatePlaybook } from "../services/actionableIntelEngine";
 import {
@@ -56,6 +59,48 @@ export const DossierModal: React.FC<DossierModalProps> = ({
   const [dossier, setDossier] = useState<CourtDossier | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [copied, setCopied] = useState(false);
+  const { user } = useAuth();
+
+  // Phase 8 Req33 — judicial filing particulars (court-admissible header block).
+  const dept = useMemo(() => agencyToDepartment(currentCase.leadAgency || ""), [currentCase.leadAgency]);
+  const [courtName, setCourtName] = useState("Special Court");
+  const [venue, setVenue] = useState("Mumbai");
+  const [jurisdiction, setJurisdiction] = useState(dept.jurisdiction);
+  const [regNumber, setRegNumber] = useState(currentCase.codeName);
+  const [filingDate, setFilingDate] = useState(new Date().toISOString().split("T")[0]);
+  const [ioName, setIoName] = useState(user?.name || "");
+  const [ioRank, setIoRank] = useState(user?.designation || "");
+  const [ioBadge, setIoBadge] = useState(user?.official_id || "");
+  const [liveEvidence, setLiveEvidence] = useState<any[]>([]);
+  const [liveMembers, setLiveMembers] = useState<any[]>([]);
+  const [liveFirs, setLiveFirs] = useState<any[]>([]);
+  const [signatures, setSignatures] = useState<any[]>([]);
+  const [signBusy, setSignBusy] = useState(false);
+  const [signMsg, setSignMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setJurisdiction(dept.jurisdiction);
+    setRegNumber(currentCase.codeName);
+    if (user) {
+      setIoName((v) => v || user.name);
+      setIoRank((v) => v || user.designation);
+      setIoBadge((v) => v || user.official_id);
+    }
+    caseApi
+      .getCaseState(currentCase.id)
+      .then((st) => {
+        setLiveEvidence(st.evidenceFiles || []);
+        setLiveMembers(st.members || []);
+        setLiveFirs(st.firs || []);
+      })
+      .catch(() => undefined);
+    caseApi
+      .getDossierSignatures(currentCase.id)
+      .then((r) => setSignatures(r.signatures || []))
+      .catch(() => setSignatures([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, currentCase.id]);
 
   const playbookSteps = useMemo(() => {
     const cutVerts = nodes.filter((n) => n.isCutVertex).map((n) => n.id);
@@ -153,14 +198,14 @@ export const DossierModal: React.FC<DossierModalProps> = ({
     );
     return reviewLogs.map((log) => {
       const metadata = log.metadata as any;
-      const targetNode = nodes.find((n) => n.id === log.target_id);
-      const targetLink = links.find((l) => l.id === log.target_id);
+      const targetNode = nodes.find((n) => n.id === log.targetId);
+      const targetLink = links.find((l) => l.id === log.targetId);
       return {
         officerId: log.user_id,
         officerName: log.user_name,
         officerRank: log.user_role,
-        targetType: log.target_type || (targetNode ? "NODE" : targetLink ? "LINK" : "UNKNOWN"),
-        targetLabel: log.target_label,
+        targetType: log.targetType || (targetNode ? "NODE" : targetLink ? "LINK" : "UNKNOWN"),
+        targetLabel: log.targetLabel,
         previousState: metadata?.previousState || "NEEDS_REVIEW",
         newState: metadata?.newState || "CONFIRMED",
         note: metadata?.note || "",
@@ -180,15 +225,212 @@ export const DossierModal: React.FC<DossierModalProps> = ({
         officerName: log.user_name,
         officerRank: log.user_role,
         action: log.action,
-        targetType: log.target_type,
-        targetLabel: log.target_label,
+        targetType: log.targetType,
+        targetLabel: log.targetLabel,
         timestamp: log.timestamp,
         digitalHash: log.digital_hash,
         verified: true,
       }));
   }
 
-  const handlePrint = () => {
+  // ---------------------------------------------------------------------------
+  // Phase 8 Req33 — formal judicial dossier engine (court-admissible).
+  // Court header + seal + registration number; date/venue/jurisdiction;
+  // Case Facts; Accused/Suspect Profiles; Exhibits & Evidence Matrix with
+  // provenance; Chronological Findings; Statutory Citations (IPC/BNS,
+  // CrPC/BNSS, Special Acts); IO Attestation. Serif typography, evidentiary
+  // tables, formal margins, running headers, Page X of Y footers.
+  // ---------------------------------------------------------------------------
+  const esc = (s: any) =>
+    String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+
+  const sealFile =
+    dept.code === "CBI" ? "cbi.svg" : dept.code === "NIA" ? "nia.svg" : dept.code === "CID" ? "cid.svg" : "state-police.svg";
+  const sealUrl = `${window.location.origin}/assets/logos/${sealFile}`;
+
+  const statuteGroups = useMemo(() => {
+    const groups: Record<string, string[]> = { "IPC / BNS": [], "CrPC / BNSS": [], "Special Acts": [] };
+    const seen = new Set<string>();
+    for (const s of playbookSteps) {
+      const label = `${s.legalBasis.statute} — ${s.legalBasis.provision}`.trim();
+      if (!label || label === "—" || seen.has(label)) continue;
+      seen.add(label);
+      if (/NDPS|UAPA|PMLA|ARMS|IT ACT|PREVENTION OF CORRUPTION|COFEPOSA|NIA ACT/i.test(label)) groups["Special Acts"].push(label);
+      else if (/CRPC|BNSS|CR\.?P\.?C|BNSS|41|41A|102|154|161|164|172|173|65B|63 BSA/i.test(label)) groups["CrPC / BNSS"].push(label);
+      else groups["IPC / BNS"].push(label);
+    }
+    if (Object.values(groups).every((g) => g.length === 0)) {
+      groups["CrPC / BNSS"].push("Sec 172 CrPC / Sec 176 BNSS — Case Diary", "Sec 65B Indian Evidence Act / Sec 63 BSA — Electronic Records");
+    }
+    return groups;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playbookSteps.length]);
+
+  const chronology = useMemo(() => {
+    const rows: Array<{ date: string; event: string }> = [];
+    for (const f of liveFirs as any[]) rows.push({ date: String((f as any).date || (f as any).registeredAt || ""), event: `FIR ${(f as any).firNumber || ""} registered — ${((f as any).sections || []).join(", ")}` });
+    for (const e of liveEvidence) rows.push({ date: String(e.uploadedAt || "").slice(0, 10), event: `Exhibit ${e.fileName} ingested (${e.sourceAuthority || "vault"})` });
+    return rows
+      .filter((r) => r.date)
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .slice(0, 60);
+  }, [liveFirs, liveEvidence]);
+
+  const accused = useMemo(
+    () => nodes.filter((n) => n.type === "PERSON").sort((a, b) => (b.riskScore || 0) - (a.riskScore || 0)).slice(0, 24),
+    [nodes]
+  );
+
+  const buildJudicialHtml = () => {
+    const suspects = accused
+      .map(
+        (s, i) => `<tr>
+          <td>${i + 1}</td><td><strong>${esc(s.label)}</strong><br/><span class="muted">Aliases: ${esc((s.aliases || []).join(", ") || "—")}</span></td>
+          <td>${esc(s.role || s.type)}</td><td>${s.riskScore ?? "—"}</td>
+          <td>${esc(s.details?.notes || s.details?.status || "Under investigation")}</td>
+        </tr>`
+      )
+      .join("");
+    const exhibits = (liveEvidence.length > 0 ? liveEvidence : (currentCase.evidenceFiles || []) as any[])
+      .map(
+        (e: any, i: number) => `<tr>
+          <td>Ex-${i + 1}</td><td><strong>${esc(e.fileName || e.file_name)}</strong></td>
+          <td>${esc(e.fileType || e.file_type || "—")}</td>
+          <td class="mono">${esc(String(e.fileHash || e.file_hash || "—")).slice(0, 20)}…</td>
+          <td>${esc(e.sourceAuthority || e.source_authority || "Case vault")}</td>
+          <td>${esc(e.lifecycleStatus || e.status || e.processingStatus || "—")}</td>
+        </tr>`
+      )
+      .join("");
+    const chrono = chronology.map((c) => `<tr><td class="mono">${esc(c.date)}</td><td>${esc(c.event)}</td></tr>`).join("");
+    const statutes = (Object.entries(statuteGroups) as Array<[string, string[]]>)
+      .filter(([, v]) => v.length > 0)
+      .map(([k, v]) => `<h3>${esc(k)}</h3><ul>${v.map((s) => `<li>${esc(s)}</li>`).join("")}</ul>`)
+      .join("");
+
+    return `<!DOCTYPE html>
+<html>
+<head>
+  <title>Judicial Dossier - ${esc(regNumber)} (${esc(currentCase.codeName)})</title>
+  <style>
+    @page { size: A4; margin: 25mm;
+      @top-center { content: "${esc(regNumber)} · ${esc(currentCase.codeName)}"; font-family: 'Times New Roman', Times, serif; font-size: 8pt; color: #6b7280; }
+      @bottom-center { content: "Page " counter(page) " of " counter(pages); font-family: 'Times New Roman', Times, serif; font-size: 8.5pt; color: #374151; }
+    }
+    body { font-family: 'Times New Roman', Times, serif; color: #111; background: #fff; line-height: 1.55; font-size: 12pt; margin: 0; padding: 0 4mm; }
+    .court { text-align: center; border-bottom: 3px double #000; padding-bottom: 10px; margin-bottom: 14px; }
+    .court h1 { font-size: 17pt; margin: 6px 0 2px 0; letter-spacing: 0.5px; }
+    .court .sub { font-size: 10pt; color: #333; }
+    .seal { width: 72px; height: 72px; margin: 0 auto 4px auto; display: block; }
+    .regbox { border: 1px solid #000; padding: 8px 12px; margin: 12px 0; font-size: 10.5pt; }
+    .regbox table { width: 100%; border: none; }
+    .regbox td { border: none; padding: 2px 6px; vertical-align: top; }
+    h2 { font-size: 13pt; text-transform: uppercase; letter-spacing: 0.6px; border-bottom: 1px solid #000; padding-bottom: 3px; margin: 20px 0 8px 0; }
+    h3 { font-size: 11.5pt; margin: 10px 0 4px 0; }
+    table.ev { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+    table.ev th, table.ev td { border: 1px solid #444; padding: 4px 6px; text-align: left; }
+    table.ev th { background: #eee; }
+    .mono { font-family: 'Courier New', monospace; font-size: 8.5pt; }
+    .muted { color: #555; font-size: 9pt; }
+    tr, .avoid { page-break-inside: avoid; }
+    .attest { margin-top: 26px; display: flex; justify-content: space-between; }
+    .attest .sig { width: 44%; }
+    .attest .line { border-bottom: 1px solid #000; height: 44px; margin-bottom: 4px; }
+    .cert { margin-top: 14px; border: 1px solid #000; padding: 8px 10px; font-size: 9.5pt; }
+  </style>
+</head>
+<body>
+  <div class="court">
+    <img class="seal" src="${sealUrl}" alt="Department seal" />
+    <h1>IN THE COURT OF ${esc(courtName).toUpperCase()}</h1>
+    <div class="sub">${esc(dept.fullName)} &middot; ${esc(venue)} &middot; Jurisdiction: ${esc(jurisdiction)}</div>
+  </div>
+  <div class="regbox">
+    <table>
+      <tr><td><strong>Case Title:</strong></td><td>${esc(currentCase.name)}</td><td><strong>Registration No.:</strong></td><td><strong>${esc(regNumber)}</strong></td></tr>
+      <tr><td><strong>Code Name:</strong></td><td>${esc(currentCase.codeName)}</td><td><strong>Date:</strong></td><td>${esc(filingDate)}</td></tr>
+      <tr><td><strong>Lead Agency:</strong></td><td>${esc(currentCase.leadAgency || dept.fullName)}</td><td><strong>Venue:</strong></td><td>${esc(venue)}</td></tr>
+    </table>
+  </div>
+
+  <h2>I. Case Facts</h2>
+  <p>${esc(displayDossier.executiveSummary || currentCase.description)}</p>
+
+  <h2>II. Accused / Suspect Profiles (${accused.length})</h2>
+  <table class="ev"><thead><tr><th>#</th><th>Name</th><th>Role</th><th>Risk</th><th>Alleged Acts / Status</th></tr></thead>
+  <tbody>${suspects || '<tr><td colspan="5">No person entities on record.</td></tr>'}</tbody></table>
+
+  <h2>III. Exhibits &amp; Evidence Matrix (with Provenance)</h2>
+  <table class="ev"><thead><tr><th>ID</th><th>Exhibit</th><th>Type</th><th>SHA-256</th><th>Source Provenance</th><th>Status</th></tr></thead>
+  <tbody>${exhibits || '<tr><td colspan="6">No exhibits on record.</td></tr>'}</tbody></table>
+
+  <h2>IV. Chronological Findings</h2>
+  <table class="ev"><thead><tr><th style="width:110px">Date</th><th>Finding</th></tr></thead>
+  <tbody>${chrono || '<tr><td colspan="2">No dated findings on record.</td></tr>'}</tbody></table>
+
+  <h2>V. Statutory Citations</h2>
+  ${statutes}
+
+  <h2>VI. Investigating Officer Attestation</h2>
+  <p>I, <strong>${esc(ioName)}</strong>, ${esc(ioRank)} (${esc(ioBadge)}), do hereby attest that the facts, exhibits and findings recorded above were collected and verified in the course of investigation of case <strong>${esc(regNumber)}</strong>, and are true to the best of my knowledge and belief. Place: ${esc(venue)} &nbsp; Date: ${esc(filingDate)}.</p>
+  <div class="attest">
+    <div class="sig"><div class="line"></div><strong>${esc(ioName)}</strong><br/><span class="muted">${esc(ioRank)} · ${esc(ioBadge)}</span><br/><span class="muted">Investigating Officer</span></div>
+    <div class="sig"><div class="line"></div><strong>Countersigned</strong><br/><span class="muted">Supervisory Officer · Seal</span></div>
+  </div>
+  <div class="cert">Certified under Section 65B of the Indian Evidence Act / Section 63 of the Bharatiya Sakshya Adhiniyam (BSA): electronic records annexed hereto carry SHA-256 integrity hashes recorded in the evidence matrix above.</div>
+  ${signatures.length > 0 ? `<h2>VII. Prior Signatures on Record</h2><table class="ev"><thead><tr><th>Officer</th><th>Role / Badge</th><th>Signed At</th><th>Signature Hash</th></tr></thead><tbody>${signatures.map((s: any) => `<tr><td><strong>${esc(s.signed_by)}</strong></td><td>${esc(s.signed_role)} · ${esc(s.signed_badge)}</td><td class="mono">${esc(String(s.signed_at).slice(0, 16).replace("T", " "))}</td><td class="mono">${esc(String(s.signature_hash)).slice(0, 28)}…</td></tr>`).join("")}</tbody></table>` : ""}
+
+  <script>window.onload = function() { setTimeout(function() { window.print(); }, 300); };</script>
+</body>
+</html>`;
+  };
+
+  const openPrintWindow = (html: string) => {
+    try {
+      const printWindow = window.open("", "_blank");
+      if (printWindow) {
+        printWindow.document.open();
+        printWindow.document.write(html);
+        printWindow.document.close();
+      } else {
+        const iframe = document.createElement("iframe");
+        iframe.style.position = "fixed";
+        iframe.style.right = "0";
+        iframe.style.bottom = "0";
+        iframe.style.width = "0";
+        iframe.style.height = "0";
+        iframe.style.border = "0";
+        document.body.appendChild(iframe);
+        const doc = iframe.contentWindow?.document || iframe.contentDocument;
+        if (doc) {
+          doc.open();
+          doc.write(html);
+          doc.close();
+          setTimeout(() => {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+            setTimeout(() => {
+              document.body.removeChild(iframe);
+            }, 2000);
+          }, 400);
+        } else {
+          window.print();
+        }
+      }
+    } catch (e) {
+      console.warn("Popup print failed, falling back to window.print()", e);
+      window.print();
+    }
+  };
+
+  const handlePrint = () => openPrintWindow(buildJudicialHtml());
+
+  // Legacy intel-format print retained for reference (superseded by the judicial dossier below).
+  const handlePrintIntel = () => {
     try {
       const printWindow = window.open("", "_blank");
       const officerDecisionsHtml = (displayDossier.officerDecisions || []).length > 0 ? `
@@ -626,6 +868,66 @@ ${displayDossier.actionableNextSteps.map((step, idx) => `${idx + 1}. ${step}`).j
 
         {/* Dossier Document Content Area */}
         <div className="flex-1 overflow-y-auto p-6 sm:p-8 bg-slate-950/60 font-sans space-y-6 print:bg-white print:text-black">
+          {/* Judicial filing particulars (Req33 header block) */}
+          <div className="p-4 bg-slate-900 border border-amber-500/30 rounded-xl space-y-3">
+            <div className="text-[11px] font-bold text-amber-300 uppercase tracking-wider">
+              Judicial Filing Particulars — printed on the court dossier
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <label className="block">
+                <span className="text-[10px] font-semibold text-slate-400">Court</span>
+                <input value={courtName} onChange={(e) => setCourtName(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-semibold text-slate-400">Registration No.</span>
+                <input value={regNumber} onChange={(e) => setRegNumber(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 font-mono" />
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-semibold text-slate-400">Date</span>
+                <input type="date" value={filingDate} onChange={(e) => setFilingDate(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-semibold text-slate-400">Venue</span>
+                <input value={venue} onChange={(e) => setVenue(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
+              </label>
+              <label className="block sm:col-span-2">
+                <span className="text-[10px] font-semibold text-slate-400">Jurisdiction</span>
+                <input value={jurisdiction} onChange={(e) => setJurisdiction(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-semibold text-slate-400">IO Name</span>
+                <input value={ioName} onChange={(e) => setIoName(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-semibold text-slate-400">IO Rank</span>
+                <input value={ioRank} onChange={(e) => setIoRank(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-semibold text-slate-400">IO Badge</span>
+                <input value={ioBadge} onChange={(e) => setIoBadge(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 font-mono" />
+              </label>
+            </div>
+            <p className="text-[10px] font-mono text-slate-500">
+              Seal: {dept.fullName} · {liveEvidence.length} live exhibits · {liveMembers.length} team members · {accused.length} accused profiles
+            </p>
+            {signMsg && (
+              <div className={`p-2.5 rounded-xl text-[11px] border ${signMsg.ok ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-rose-500/10 border-rose-500/30 text-rose-300"}`}>
+                {signMsg.text}
+              </div>
+            )}
+            {signatures.length > 0 && (
+              <div className="space-y-1.5">
+                {signatures.map((s: any) => (
+                  <div key={s._id} className="flex items-center justify-between gap-2 rounded-lg bg-emerald-500/5 border border-emerald-500/25 px-2.5 py-1.5 text-[11px]">
+                    <span className="text-emerald-200 font-semibold truncate">
+                      ✓ {s.signed_by} ({s.signed_role}) · {new Date(s.signed_at).toLocaleString()}
+                    </span>
+                    <span className="font-mono text-[10px] text-emerald-300/80 shrink-0">{String(s.signature_hash).slice(0, 20)}…</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           {/* Document Masthead */}
           <div className="border-b-2 border-slate-700 pb-4 text-center">
             <div className="text-[11px] font-mono uppercase tracking-widest text-amber-400 font-bold mb-1">
@@ -890,10 +1192,38 @@ ${displayDossier.actionableNextSteps.map((step, idx) => `${idx + 1}. ${step}`).j
           <div className="flex items-center gap-2">
             <button
               onClick={handlePrint}
-              className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors"
+              className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold rounded-lg transition-colors"
+              title="Court-admissible judicial dossier: header, seal, reg. no., evidence matrix, statutes, attestation, Page X of Y"
             >
               <Printer className="w-4 h-4" />
-              <span>Print Dossier</span>
+              <span>Print Judicial Dossier</span>
+            </button>
+
+            <button
+              onClick={async () => {
+                if (signBusy) return;
+                setSignBusy(true);
+                setSignMsg(null);
+                try {
+                  const res = await caseApi.signDossier(currentCase.id, {
+                    regNumber: regNumber.trim(),
+                    court: courtName,
+                    venue,
+                  });
+                  setSignatures((p) => [res.signature, ...p]);
+                  setSignMsg({ ok: true, text: `Signed & certified under Sec 65B/63 (${res.signature.signature_hash.slice(0, 24)}…).` });
+                } catch (err: any) {
+                  setSignMsg({ ok: false, text: err.message || "Signing failed. Leads/Admins only." });
+                } finally {
+                  setSignBusy(false);
+                }
+              }}
+              disabled={signBusy || !regNumber.trim()}
+              className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition-colors disabled:opacity-50"
+              title="Sign & Certify this dossier under Section 65B IEA / Section 63 BSA"
+            >
+              <FileSignature className="w-4 h-4" />
+              <span>{signBusy ? "Signing…" : "Sign & Certify (65B/63)"}</span>
             </button>
 
             <button

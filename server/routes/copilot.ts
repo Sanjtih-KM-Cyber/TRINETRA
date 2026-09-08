@@ -59,7 +59,7 @@ router.post("/:caseId/query", requireCaseMembership, requireCopilotAccess, async
   const provider = getActiveProvider();
   
   try {
-    const systemPrompt = `You are the CRIM-INTEL National Security AI Copilot advising Law Enforcement and Investigative Officers on the case.
+    const systemPrompt = `You are the TRINETRA National Security AI Copilot advising Law Enforcement and Investigative Officers on the case.
 Answer the investigator's question thoroughly, tactically, and accurately based on the case intelligence and forensic principles.
 You can answer ANY question regarding the criminal network, syndicate hierarchy, phone call triangulation, Hawala financial conduits, legal sections (CrPC/BNS/NDPS/IT Act), interrogation strategies, or graph analytics.
 If specific case context is relevant, cite entities, exhibits, or forensic markers.`;
@@ -167,7 +167,7 @@ router.post(["/", "/query"], async (req: AuthenticatedRequest, res: Response) =>
   let recommendedActions: string[] = [];
 
   try {
-    const systemPrompt = `You are the CRIM-INTEL AI Copilot providing tactical intelligence assessments for law enforcement.`;
+    const systemPrompt = `You are the TRINETRA AI Copilot providing tactical intelligence assessments for law enforcement.`;
     const userPrompt = `Case: ${effectiveCaseId}
 Entities: ${entities.length}
 Relationships: ${relationships.length}

@@ -7,23 +7,27 @@ import {
   AlertTriangle,
   MapPin,
   Database,
-  Bot,
   FileText,
+  Inbox,
+  Radar,
   ChevronRight,
   FolderGit2,
   FolderArchive,
   LogOut,
   X,
+  Sparkles,
 } from "lucide-react";
-import { CaseDataset } from "../types";
+import { CaseDataset, WorkstationTab } from "../types";
+import { isLead, isCyber } from "../data/roles";
 
 interface SidebarProps {
   currentCase: CaseDataset;
   allCases: CaseDataset[];
   onSelectCase: (c: CaseDataset) => void;
-  activeTab: "overview" | "graph" | "analytics" | "patterns" | "geo" | "ingest";
-  onTabChange: (tab: "overview" | "graph" | "analytics" | "patterns" | "geo" | "ingest") => void;
-  onOpenCopilot: () => void;
+  activeTab: WorkstationTab;
+  onTabChange: (tab: WorkstationTab) => void;
+  /** @deprecated Phase 5 Req23 — AI Graph Copilot removed; kept optional for callers. */
+  onOpenCopilot?: () => void;
   onOpenDossier: () => void;
   onOpenNewCase?: () => void;
   onOpenArchive?: () => void;
@@ -37,6 +41,8 @@ interface SidebarProps {
   onToggleCollapse: () => void;
   isMobileOpen?: boolean;
   onCloseMobile?: () => void;
+  /** Phase 4 Req18/19 — Lead sees SAHAYAK AI instead of Evidence Ingestion; cyber cell hidden from Leads. */
+  userRole?: string;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -45,7 +51,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectCase,
   activeTab,
   onTabChange,
-  onOpenCopilot,
   onOpenDossier,
   onOpenNewCase,
   onOpenArchive,
@@ -59,62 +64,79 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleCollapse,
   isMobileOpen = false,
   onCloseMobile,
+  userRole,
 }) => {
-  const navItems = [
-    {
-      id: "overview" as const,
-      label: "Command Overview",
-      subtitle: "Executive Intel & Case Team",
-      icon: LayoutDashboard,
-      badge: null,
-    },
-    {
-      id: "graph" as const,
-      label: "Graph Workstation",
-      subtitle: "Force-Directed Analyst Canvas",
-      icon: Network,
-      badge: null,
-    },
-    {
-      id: "analytics" as const,
-      label: "Centrality & Bottlenecks",
-      subtitle: "Betweenness & Cut-Vertices",
-      icon: Layers,
-      badge: null,
-    },
-    {
-      id: "patterns" as const,
-      label: "Threat Patterns & Leads",
-      subtitle: "Burner, Hawala & Convergence",
-      icon: AlertTriangle,
-      badge: null,
-    },
-    {
-      id: "geo" as const,
-      label: "Geospatial & Timeline",
-      subtitle: "GIS Triangulation & Chronology",
-      icon: MapPin,
-      badge: null,
-    },
-    {
-      id: "ingest" as const,
-      label: "Evidence Ingestion",
-      subtitle: "FIR, Diary NLP & CDR Parser",
-      icon: Database,
-      badge: null,
-    },
-  ];
+  // Changes.md portals — Lead: overview/graph/patterns/geo/sahayak/staging.
+  // Cyber: ingestion console + cyber cell only.
+  const leadView = !!userRole && isLead(userRole);
+  const cyberView = !!userRole && isCyber(userRole);
+  const navItems = cyberView
+    ? [
+        {
+          id: "ingest" as const,
+          label: "Digital Ingestion Console",
+          subtitle: "CDR Dumps, Tower Logs & OSINT",
+          icon: Database,
+          badge: null,
+        },
+        {
+          id: "cyber" as const,
+          label: "Cyber Crime Cell",
+          subtitle: "Tasks, Correlator, Trails, CEIR",
+          icon: Radar,
+          badge: null,
+        },
+      ]
+    : [
+        {
+          id: "overview" as const,
+          label: "Command Overview",
+          subtitle: "Executive Intel & Case Team",
+          icon: LayoutDashboard,
+          badge: null,
+        },
+        {
+          id: "graph" as const,
+          label: "Graph Workstation",
+          subtitle: "Force-Directed Analyst Canvas",
+          icon: Network,
+          badge: null,
+        },
+        {
+          id: "patterns" as const,
+          label: "Threat Patterns & Leads",
+          subtitle: "Burner, Hawala & Convergence",
+          icon: AlertTriangle,
+          badge: null,
+        },
+        {
+          id: "geo" as const,
+          label: "Geospatial & Timeline",
+          subtitle: "GIS Triangulation & Chronology",
+          icon: MapPin,
+          badge: null,
+        },
+        {
+          id: "sahayak" as const,
+          label: "SAHAYAK AI",
+          subtitle: "Investigative Chat + Case RAG",
+          icon: Sparkles,
+          badge: null,
+        },
+        {
+          id: "staging" as const,
+          label: "Evidence Triage Queue",
+          subtitle: "Review Field, Forensic & Cyber Intake",
+          icon: Inbox,
+          badge: null,
+        },
+      ];
 
-  const handleNavClick = (tabId: "overview" | "graph" | "analytics" | "patterns" | "geo" | "ingest") => {
+  const handleNavClick = (tabId: WorkstationTab) => {
     onTabChange(tabId);
     if (onCloseMobile) {
       onCloseMobile();
     }
-  };
-
-  const handleCopilotClick = () => {
-    onOpenCopilot();
-    if (onCloseMobile) onCloseMobile();
   };
 
   const handleDossierClick = () => {
@@ -149,18 +171,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
             : "hidden md:flex"
         }`}
       >
-        {/* Top Section: Agency Branding (No confidential badge) */}
-        <div className="p-4 border-b border-slate-800/80 flex flex-col gap-3">
+        {/* Top Section: Agency Branding (dept-accented) */}
+        <div
+          className="p-4 border-b flex flex-col gap-3"
+          style={{ borderColor: "color-mix(in srgb, var(--dept-accent) 30%, #1e293b)" }}
+        >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 overflow-hidden">
-              <div className="h-10 w-10 shrink-0 rounded-xl bg-gradient-to-br from-amber-500/20 to-amber-600/5 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-lg shadow-amber-500/5">
+              <div
+                className="h-10 w-10 shrink-0 rounded-xl border flex items-center justify-center shadow-lg"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--dept-accent) 45%, transparent)",
+                  color: "var(--dept-accent)",
+                  background: "color-mix(in srgb, var(--dept-accent) 12%, transparent)",
+                }}
+              >
                 <ShieldAlert className="w-5 h-5" />
               </div>
               {(!isCollapsed || isMobileOpen) && (
                 <div className="truncate">
                   <div className="flex items-center gap-1.5">
                     <span className="font-mono text-[10px] font-bold text-amber-400 tracking-wider uppercase">
-                      CRIM-INTEL OS
+                      TRINETRA OS
                     </span>
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
                   </div>
@@ -254,26 +286,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           )}
 
-          {/* AI Copilot */}
-          <button
-            onClick={handleCopilotClick}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-left transition-all border border-indigo-500/30 bg-gradient-to-r from-indigo-950/40 to-slate-900 text-indigo-300 hover:text-indigo-200 hover:border-indigo-500/50 shadow-sm`}
-            title="AI Criminal Graph Copilot"
-          >
-            <div className="p-1.5 rounded-lg bg-indigo-500/20 text-indigo-400 shrink-0">
-              <Bot className="w-4 h-4" />
-            </div>
-            {(!isCollapsed || isMobileOpen) && (
-              <div className="flex-1 truncate">
-                <span className="text-xs font-semibold tracking-tight block">AI Graph Copilot</span>
-                <span className="text-[10px] text-slate-400 block truncate font-normal">
-                  Multi-hop reasoning & inquiry
-                </span>
-              </div>
-            )}
-          </button>
 
-          {/* Judicial Dossier */}
+
+          {/* Judicial Dossier — Lead signatories only (Cyber cannot sign) */}
+          {!cyberView && (
           <button
             onClick={handleDossierClick}
             className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-left transition-all border border-amber-500/30 bg-gradient-to-r from-amber-950/40 to-slate-900 text-amber-300 hover:text-amber-200 hover:border-amber-500/50 shadow-sm`}
@@ -291,6 +307,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             )}
           </button>
+          )}
 
           {/* Archive & Backup */}
           {onOpenArchive && (

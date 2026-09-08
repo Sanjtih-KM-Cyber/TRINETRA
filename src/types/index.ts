@@ -68,13 +68,9 @@ export type AIProcessingEngine =
   | "GROQ_LPU"
   | "GEMINI_37";
 
-// Core 4 Application Roles strictly per specifications (no Intelligence Analyst role)
-export type UserRole =
-  | "ADMIN"
-  | "LEAD_INVESTIGATOR"
-  | "FORENSIC_INVESTIGATOR"
-  | "INVESTIGATOR"
-  | "INSPECTOR";
+// Phase 0 — canonical per-organization roles live in the shared model.
+export type { UserRole } from "../data/roles";
+import type { UserRole } from "../data/roles";
 
 export type UserStatus = "PENDING" | "ACTIVE" | "REJECTED" | "SUSPENDED";
 
@@ -102,6 +98,8 @@ export interface UserAccount {
   designation: string;
   department: string;
   role: UserRole;
+  /** State police jurisdiction (e.g. "MAHARASHTRA", "KARNATAKA"); undefined for central agencies. */
+  state?: string;
   status: UserStatus;
   created_at: string;
   approved_by?: string;
@@ -133,7 +131,7 @@ export interface AccessRequest {
   agency: string;
   designation: string;
   department: string;
-  requested_role: "LEAD_INVESTIGATOR" | "FORENSIC_INVESTIGATOR" | "INVESTIGATOR";
+  requested_role: UserRole;
   reason_for_access: string;
   status: "PENDING" | "APPROVED" | "REJECTED";
   submitted_at: string;
@@ -166,7 +164,7 @@ export interface CaseAccessRequest {
   user_email: string;
   official_id: string;
   agency: string;
-  user_role: "LEAD_INVESTIGATOR" | "FORENSIC_INVESTIGATOR" | "INVESTIGATOR";
+  user_role: UserRole;
   reason_for_access: string;
   status: "PENDING" | "APPROVED" | "REJECTED";
   requested_at: string;
@@ -810,6 +808,467 @@ export interface CriminalRecord {
   cases: CriminalCase[];
   associates: CriminalAssociate[];
   historySheet?: HistorySheet;
+}
+
+export type WorkstationTab =
+  | "overview"
+  | "graph"
+  | "patterns"
+  | "geo"
+  | "ingest"
+  | "sahayak"
+  | "proceedings"
+  | "staging"
+  | "cyber";
+
+// ---------------------------------------------------------------------------
+// PHASE 1 — Core Investigation Engine (Sec 172 / 41 / 102 / 173 CrPC)
+// ---------------------------------------------------------------------------
+
+export interface DiarySignature {
+  name: string;
+  rank: string;
+  badgeNumber?: string;
+  signedAt: string;
+  hash: string;
+}
+
+export interface CaseDiaryEntry {
+  _id: string;
+  case_id: string;
+  diaryNo: number;
+  date: string;
+  time?: string;
+  place: string;
+  firRef?: string;
+  proceedings: string;
+  actionTaken?: string;
+  autoLogged?: boolean;
+  sourceAction?: string;
+  voiceLocale?: string;
+  status: "DRAFT" | "SIGNED" | "COUNTERSIGNED";
+  ioName: string;
+  ioRank: string;
+  ioId: string;
+  ioSignature?: DiarySignature;
+  countersign?: DiarySignature;
+  prevHash?: string;
+  hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ArrestMemoType = "ARREST" | "SEIZURE" | "ARREST_CUM_SEIZURE";
+export type MemoStatute = "CRPC_41" | "CRPC_41A" | "CRPC_102" | "BNSS_35" | "BNSS_35_3" | "BNSS_185";
+
+export interface MemoPerson {
+  name: string;
+  age?: number;
+  gender?: string;
+  address: string;
+  idType?: string;
+  idNumber?: string;
+}
+
+export interface SeizedArticle {
+  description: string;
+  quantity: string;
+  value?: number;
+  identificationMark?: string;
+  sealed: boolean;
+  sealNo?: string;
+}
+
+export interface MemoWitness {
+  name: string;
+  address: string;
+  relation?: string;
+  signed: boolean;
+  signedAt?: string;
+}
+
+export interface AadhaarESign {
+  signerName: string;
+  signerRole: string;
+  aadhaarMasked: string;
+  signedAt: string;
+  hash: string;
+}
+
+export interface ArrestMemo {
+  _id: string;
+  case_id: string;
+  memoNo: string;
+  memoType: ArrestMemoType;
+  statute: MemoStatute;
+  date: string;
+  time?: string;
+  place: string;
+  firNumber: string;
+  sections: string[];
+  accused?: MemoPerson;
+  groundsOfArrest?: string;
+  articles: SeizedArticle[];
+  witnesses: MemoWitness[];
+  rightsRead: boolean;
+  intimationName?: string;
+  intimationRelation?: string;
+  intimationPhone?: string;
+  intimationAt?: string;
+  ioName: string;
+  ioRank: string;
+  ioId: string;
+  esign?: AadhaarESign;
+  status: "DRAFT" | "SIGNED" | "FILED";
+  hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type HistorySheetCategory = "A" | "B" | "C";
+
+export interface HistorySheet {
+  _id: string;
+  case_id: string;
+  sheetNo: string;
+  subjectName: string;
+  aliases: string[];
+  dob?: string;
+  address: string;
+  policeStation: string;
+  district: string;
+  category: HistorySheetCategory;
+  moCodes: string[];
+  previousCases: Array<{ firNumber: string; policeStation: string; sections: string; status: string }>;
+  associates: Array<{ name: string; relation: string }>;
+  village: string;
+  beatNo?: string;
+  beatOfficer?: string;
+  villageRemarks?: string;
+  villageLastChecked?: string;
+  surveillanceLevel?: string;
+  checkIntervalDays?: number;
+  lastChecked?: string;
+  nextCheck?: string;
+  openedBy: string;
+  openedByRank: string;
+  openedAt: string;
+  status: "ACTIVE" | "CLOSED";
+  hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type CustodyStatus =
+  | "POLICE_CUSTODY"
+  | "JUDICIAL_CUSTODY"
+  | "BAIL"
+  | "ABSCONDING"
+  | "DISCHARGED"
+  | "CONVICTED";
+
+export type BailType = "REGULAR_437" | "ANTICIPATORY_438" | "SESSIONS_439" | "DEFAULT_167_2";
+
+export interface RemandOrder {
+  id: string;
+  orderDate: string;
+  court: string;
+  daysGranted: number;
+  custodyType: "PC" | "JC";
+  producedViaVC: boolean;
+  orderRef?: string;
+  recordedBy: string;
+  recordedAt: string;
+}
+
+export interface BailApplication {
+  id: string;
+  bailType: BailType;
+  filedDate: string;
+  court: string;
+  status: "PENDING" | "GRANTED" | "REJECTED" | "WITHDRAWN";
+  decidedDate?: string;
+  conditions?: string;
+  suretyAmount?: number;
+  decidedBy?: string;
+}
+
+export interface CustodyRecord {
+  _id: string;
+  case_id: string;
+  accusedName: string;
+  firNumber: string;
+  sections: string[];
+  arrestDate: string;
+  arrestMemoId?: string;
+  offencePunishmentYears: number;
+  remands: RemandOrder[];
+  bailApplications: BailApplication[];
+  status: CustodyStatus;
+  recordedBy: string;
+  recordedByRank: string;
+  policeCustodyUsedDays: number;
+  chargeSheetDueDate?: string;
+  hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustodyAlert {
+  recordId: string;
+  accusedName: string;
+  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "INFO";
+  kind:
+    | "PC_EXPIRY"
+    | "PC_EXHAUSTED"
+    | "REMAND_EXPIRY"
+    | "CHARGESHEET_DUE"
+    | "DEFAULT_BAIL_ELIGIBLE"
+    | "DEFAULT_BAIL_OVERDUE"
+    | "BAIL_PENDING";
+  message: string;
+  dueDate?: string;
+  daysLeft?: number;
+}
+
+export interface ChargeSheetAnnexure {
+  id: string;
+  letter: string;
+  title: string;
+  docType: string;
+  pages?: number;
+  hash?: string;
+  exhibitRef?: string;
+  filedBy: string;
+  filedAt: string;
+}
+
+export interface ChargeSheet {
+  _id: string;
+  case_id: string;
+  csNo: string;
+  firNumber: string;
+  policeStation: string;
+  district: string;
+  state: string;
+  sections: string[];
+  accused: Array<{ name: string; address?: string; custodyStatus: string; chargeFramed?: string }>;
+  witnesses: Array<{ name: string; type: string; address?: string; statement?: string }>;
+  exhibits: string[];
+  factsOfCase: string;
+  evidenceSummary: string;
+  legalOpinion: string;
+  assistMeta?: { provider: string; llmUsed: boolean; citations: string[] };
+  annexures: ChargeSheetAnnexure[];
+  ioName: string;
+  ioRank: string;
+  forwardingOfficer?: string;
+  draftSource: "MANUAL" | "SAHAYAK_ASSIST";
+  status: "DRAFT" | "IO_SIGNED" | "SP_APPROVED" | "FILED";
+  filedInCourt?: string;
+  filingDate?: string;
+  cnrNumber?: string;
+  hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// PHASE 2 — Ingestion + Approval Pipeline (Staging · Innocent Pool · Transfer)
+// ---------------------------------------------------------------------------
+
+export type CaseAccess = "FULL_EDIT" | "VIEW_ONLY";
+
+export type IngestionSource =
+  | "FIR"
+  | "CDR_CSV"
+  | "FINANCIAL_CSV"
+  | "OSINT_URL"
+  | "INTEL_REPORT"
+  | "CYBER_LOG";
+
+export type StagingStatus = "PENDING" | "APPROVED" | "REJECTED";
+
+export interface IngestionBatch {
+  _id: string;
+  case_id: string;
+  source: IngestionSource;
+  fileName?: string;
+  url?: string;
+  entityCount: number;
+  linkCount: number;
+  approvedCount: number;
+  rejectedCount: number;
+  pendingCount: number;
+  truncated?: boolean;
+  status: "STAGED" | "PARTIALLY_REVIEWED" | "FULLY_REVIEWED";
+  submittedBy: string;
+  submittedByRank: string;
+  submittedAt: string;
+  hash: string;
+}
+
+export interface StagedEntity {
+  _id: string;
+  case_id: string;
+  batchId: string;
+  source: IngestionSource;
+  label: string;
+  type: string;
+  role?: string;
+  riskScore: number;
+  confidence: number;
+  details?: any;
+  evidenceRef?: string;
+  locator?: string;
+  status: StagingStatus;
+  submittedBy: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+  duplicateOf?: string;
+  created_at: string;
+}
+
+export interface StagedLink {
+  _id: string;
+  case_id: string;
+  batchId: string;
+  source: IngestionSource;
+  sourceLabel: string;
+  targetLabel: string;
+  relationType: string;
+  weight: number;
+  frequency?: number;
+  amount?: number;
+  details?: string;
+  evidenceRef?: string;
+  locator?: string;
+  status: StagingStatus;
+  submittedBy: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+  created_at: string;
+}
+
+export interface InnocentPoolItem {
+  _id: string;
+  case_id: string;
+  kind: "ENTITY" | "LINK";
+  label: string;
+  snapshot: any;
+  rejectionReason: string;
+  rejectedBy: string;
+  rejectedAt: string;
+  source: IngestionSource;
+  batchId?: string;
+  readded: boolean;
+}
+
+export interface DeptTransfer {
+  _id: string;
+  case_id: string;
+  caseName: string;
+  fromAgency: string;
+  fromDepartment: string;
+  toAgency: string;
+  toDepartment: string;
+  toOfficerId?: string;
+  toOfficerName?: string;
+  reason: string;
+  status: "PENDING" | "ACCEPTED" | "REJECTED";
+  requestedBy: string;
+  requestedByRank: string;
+  requestedAt: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  decisionNote?: string;
+  proposalHash: string;
+  executionHash?: string;
+}
+
+// ---------------------------------------------------------------------------
+// PHASE 5 — Cyber Crime + AI Models (NCRP · CERT-In · Sec 69 · CEIR · Mesh)
+// ---------------------------------------------------------------------------
+
+export type CyberIncidentKind =
+  | "NCRP_REFERRAL"
+  | "CERT_INCIDENT"
+  | "SEC69_INTERCEPT"
+  | "CRYPTO_TRAIL"
+  | "IMEI_CEIR";
+
+export interface CyberIncident {
+  _id: string;
+  case_id: string;
+  refNo: string;
+  kind: CyberIncidentKind;
+  title: string;
+  description: string;
+  ncrpAck?: string;
+  ncrpCategory?: string;
+  amountInvolved?: number;
+  severity?: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
+  detectedAt?: string;
+  reportedAt?: string;
+  reportDueAt?: string;
+  affectedSystems?: string;
+  iocs?: string[];
+  contactName?: string;
+  contactPhone?: string;
+  orderNo?: string;
+  issuingAuthority?: string;
+  targetIdentifier?: string;
+  serviceProvider?: string;
+  periodDays?: number;
+  reviewDueAt?: string;
+  imei?: string;
+  ceirAction?: "BLOCK" | "UNBLOCK" | "TRACK";
+  ownerName?: string;
+  firRef?: string;
+  trailResult?: CryptoTrailResult;
+  status: string;
+  recordedBy: string;
+  recordedByRank: string;
+  hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CryptoTrailHop {
+  hop: number;
+  fromLabel: string;
+  toLabel: string;
+  amount?: number;
+  frequency?: number;
+  details?: string;
+}
+
+export interface CryptoTrailResult {
+  startLabel: string;
+  direction: string;
+  maxHops: number;
+  hops: CryptoTrailHop[];
+  nodesVisited: number;
+  totalIn: number;
+  totalOut: number;
+  computedAt: string;
+}
+
+export interface MeshPeer {
+  _id: string;
+  name: string;
+  baseUrl: string;
+  transport: string;
+  adapters: string[];
+  models: string[];
+  enabled: boolean;
+  lastLatencyMs?: number;
+  lastSeen?: string;
+  lastError?: string;
+  addedBy: string;
+  created_at: string;
 }
 
 export interface ICCTNSAdapter {

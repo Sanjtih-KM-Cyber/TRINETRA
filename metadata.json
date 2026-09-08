@@ -1,5 +1,5 @@
 {
-  "name": "AI Criminal Network Analysis System",
+  "name": "TRINETRA OS — The Third Eye of Investigation",
   "description": "Enterprise-grade intelligence & graph analytics platform for LEAs to ingest multi-source crime data, extract entities, compute graph centrality metrics, uncover syndicate kingpins, and detect suspicious patterns.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
