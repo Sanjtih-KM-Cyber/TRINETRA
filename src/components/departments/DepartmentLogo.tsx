@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { DepartmentIdentity } from "../../data/departments";
 
 interface DepartmentLogoProps {
@@ -12,6 +12,13 @@ export const DepartmentLogo: React.FC<DepartmentLogoProps> = ({
   size = 40,
   showLabel = false,
 }) => {
+  // Official emblem photo when present in public/logos (see README there);
+  // falls back to the built-in SVG emblem otherwise.
+  const [photoMissing, setPhotoMissing] = useState(false);
+  useEffect(() => {
+    setPhotoMissing(false);
+  }, [department.logoPath]);
+
   return (
     <div className="flex items-center gap-2.5">
       <div
@@ -24,10 +31,19 @@ export const DepartmentLogo: React.FC<DepartmentLogoProps> = ({
         }}
         title={`${department.fullName} — ${department.motto}`}
       >
-        <div
-          style={{ width: size - 4, height: size - 4 }}
-          dangerouslySetInnerHTML={{ __html: department.emblemSvg }}
-        />
+        {!photoMissing ? (
+          <img
+            src={department.logoPath}
+            alt={`${department.shortName} emblem`}
+            style={{ width: size - 4, height: size - 4, objectFit: "contain" }}
+            onError={() => setPhotoMissing(true)}
+          />
+        ) : (
+          <div
+            style={{ width: size - 4, height: size - 4 }}
+            dangerouslySetInnerHTML={{ __html: department.emblemSvg }}
+          />
+        )}
       </div>
       {showLabel && (
         <div className="min-w-0">

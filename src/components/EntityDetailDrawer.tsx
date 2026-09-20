@@ -190,12 +190,6 @@ export const EntityDetailDrawer: React.FC<EntityDetailDrawerProps> = ({
           color: "bg-rose-500/20 text-rose-300 border-rose-500/40",
           icon: XCircle,
         };
-      case "UNCERTAIN":
-        return {
-          label: "UNCERTAIN / PENDING",
-          color: "bg-purple-500/20 text-purple-300 border-purple-500/40",
-          icon: HelpCircle,
-        };
       case "NEEDS_REVIEW":
       default:
         return {
@@ -303,13 +297,13 @@ export const EntityDetailDrawer: React.FC<EntityDetailDrawerProps> = ({
 
           {/* Content Body */}
           <div className="p-4 sm:p-5 space-y-5 text-xs">
-            {/* Review Decision Controller */}
-            {onUpdateReviewState && (
+            {/* Review Decision Controller — the 3 options disappear once confirmed (UNCERTAIN removed) */}
+            {onUpdateReviewState && currentReview !== "CONFIRMED" && (
               <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-2">
                 <div className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider">
                   Investigator Review Decision
                 </div>
-                <div className="grid grid-cols-4 gap-1.5">
+                <div className="grid grid-cols-3 gap-1.5">
                   <button
                     onClick={() => onUpdateReviewState(node.id, "CONFIRMED")}
                     className={`py-1.5 px-2 rounded-lg text-[10px] font-bold transition-all flex flex-col items-center justify-center gap-1 border ${
@@ -335,18 +329,6 @@ export const EntityDetailDrawer: React.FC<EntityDetailDrawerProps> = ({
                   </button>
 
                   <button
-                    onClick={() => onUpdateReviewState(node.id, "UNCERTAIN")}
-                    className={`py-1.5 px-2 rounded-lg text-[10px] font-bold transition-all flex flex-col items-center justify-center gap-1 border ${
-                      currentReview === "UNCERTAIN"
-                        ? "bg-purple-500/20 text-purple-300 border-purple-500/60 ring-1 ring-purple-500/30"
-                        : "bg-slate-900 border-slate-800 text-slate-400 hover:text-purple-300"
-                    }`}
-                  >
-                    <HelpCircle className="w-3.5 h-3.5" />
-                    <span>Uncertain</span>
-                  </button>
-
-                  <button
                     onClick={() => onUpdateReviewState(node.id, "REJECTED")}
                     className={`py-1.5 px-2 rounded-lg text-[10px] font-bold transition-all flex flex-col items-center justify-center gap-1 border ${
                       currentReview === "REJECTED"
@@ -358,6 +340,18 @@ export const EntityDetailDrawer: React.FC<EntityDetailDrawerProps> = ({
                     <span>Reject</span>
                   </button>
                 </div>
+              </div>
+            )}
+            {onUpdateReviewState && currentReview === "CONFIRMED" && (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-emerald-300">✓ Confirmed evidence — review options closed</span>
+                <button
+                  onClick={() => onUpdateReviewState(node.id, "NEEDS_REVIEW")}
+                  className="text-[10px] font-mono text-slate-400 hover:text-amber-300 underline shrink-0"
+                  title="Re-open this entity for review"
+                >
+                  re-open
+                </button>
               </div>
             )}
 

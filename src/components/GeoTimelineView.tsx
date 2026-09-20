@@ -28,6 +28,8 @@ import {
   Compass,
   Expand,
   Minimize2,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 
 export interface MapFocusSignal {
@@ -45,6 +47,8 @@ interface GeoTimelineViewProps {
   onSelectNode: (node: CrimeNetworkNode) => void;
   /** Phase 2 — graph → map sync: pan + pop the marker for this node. */
   focusSignal?: MapFocusSignal | null;
+  highlightedPatternNodeIds?: string[];
+  highlightedPatternLinkIds?: string[];
 }
 
 // Utility to create a polygon representing a cell tower azimuth sector wedge
@@ -84,6 +88,8 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
   intels,
   onSelectNode,
   focusSignal = null,
+  highlightedPatternNodeIds = [],
+  highlightedPatternLinkIds = [],
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -102,10 +108,15 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
   const [showTowers, setShowTowers] = useState(true);
   const [showGeofences, setShowGeofences] = useState(true);
   const [showTrajectories, setShowTrajectories] = useState(true);
-  const [mapStyle, setMapStyle] = useState<"dark" | "satellite" | "streets">("dark");
+  const [mapStyle, setMapStyle] = useState<"satellite" | "streets">("satellite");
+  const [isTimelineOpen, setIsTimelineOpen] = useState(true);
 
-  // Timeline events unified with accurate area coordinates
-  const allEvents = useMemo(() => {
+  // Phase 8: Entity Tracking Feature
+  const [selectedTarget, setSelectedTarget] = useState<string>("ALL");
+  const uniqueTargets = useMemo(() => Array.from(new Set(SUSPECT_TRAJECTORIES.map((pt) => pt.suspectName))), []);
+
+  // Timeline events unified with accurate area coordinates and trajectory waypoints
+  const unfilteredEvents = useMemo(() => {
     return [
       ...firs.map((f) => {
         const isVashi = f.briefNarrative?.toLowerCase().includes("vashi") || f.policeStation?.toLowerCase().includes("vashi");
@@ -161,11 +172,34 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
         lng: it.lng,
         areaName: it.location || "Surveillance Location",
       })),
+      ...SUSPECT_TRAJECTORIES.map((pt) => ({
+        id: pt.id,
+        type: "TRAJECTORY",
+        title: `Movement: ${pt.suspectName}`,
+        timestamp: pt.timestamp,
+        description: `Logged at ${pt.speedKmh} km/h - ${pt.activityType}`,
+        badge: "GPS WAYPOINT",
+        color: pt.suspectId === "p-feroz" || pt.suspectId === "p-farooq" ? "#f59e0b" : "#a855f7",
+        lat: pt.lat,
+        lng: pt.lng,
+        areaName: pt.locationLabel,
+        targetTag: pt.suspectName,
+      }))
     ].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   }, [firs, cdrs, financials, intels]);
 
-  const [currentStepIndex, setCurrentStepIndex] = useState<number>(allEvents.length - 1);
+  const allEvents = useMemo(() => {
+    if (selectedTarget === "ALL") return unfilteredEvents;
+    return unfilteredEvents.filter((ev) => (ev as any).targetTag === selectedTarget);
+  }, [unfilteredEvents, selectedTarget]);
+
+  const [currentStepIndex, setCurrentStepIndex] = useState<number>(unfilteredEvents.length - 1);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+
+  // Reset scrubber when filter changes
+  useEffect(() => {
+    setCurrentStepIndex(allEvents.length > 0 ? allEvents.length - 1 : 0);
+  }, [selectedTarget, allEvents.length]);
   // TRINETRA spec — chronological playback paced at 4,000ms per step (default).
   const [playbackSpeed, setPlaybackSpeed] = useState<"slow" | "normal" | "fast">("slow");
   const PLAYBACK_MS = { slow: 4000, normal: 2500, fast: 1200 } as const;
@@ -196,15 +230,12 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
       attributionControl: true,
     });
 
-    // Phase 7 Req30 — 100% open-source, keyless raster tiles (no proprietary layers):
-    // Dark + Streets via OpenStreetMap / CARTO (ODbL, attribution required and shown).
+    // Reverting to reliable public ESRI / OSM endpoints since local ports caused auth conflicts
     const tileUrls = {
-      dark: "https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png",
       satellite: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       streets: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     };
     const tileCredits = {
-      dark: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
       satellite: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
       streets: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     };
@@ -231,22 +262,20 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
     };
   }, []);
 
-  // Update Base Tile Map Style (keyless OSS tiles + attribution)
+  // Update Base Tile Map Style
   useEffect(() => {
     if (!mapInstanceRef.current || !baseTileLayerRef.current) return;
     const tileUrls = {
-      dark: "https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png",
       satellite: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       streets: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     };
     const tileCredits = {
-      dark: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
       satellite: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
       streets: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     };
 
     mapInstanceRef.current.removeLayer(baseTileLayerRef.current);
-    const newBase = L.tileLayer(tileUrls[mapStyle], { maxZoom: 19, subdomains: "abcd", attribution: tileCredits[mapStyle] }).addTo(mapInstanceRef.current);
+    const newBase = L.tileLayer(tileUrls[mapStyle], { maxZoom: 19, attribution: tileCredits[mapStyle] }).addTo(mapInstanceRef.current);
     baseTileLayerRef.current = newBase;
   }, [mapStyle]);
 
@@ -453,7 +482,7 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
         marker.addTo(layer);
       });
     });
-  }, [showTrajectories, currentStepIndex, allEvents]);
+  }, [showTrajectories, currentStepIndex, allEvents, selectedTarget]);
 
   // Render Network Entity Safehouses & Key Nodes
   useEffect(() => {
@@ -467,6 +496,13 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
       const geo = node.details!.geo!;
       const isKingpin = node.isKingpinCandidate;
 
+      // Pattern Isolation Blur for map nodes
+      const isHighlighted = highlightedPatternNodeIds && highlightedPatternNodeIds.length > 0
+        ? highlightedPatternNodeIds.includes(node.id)
+        : true;
+      const opacity = isHighlighted ? 1 : 0.12;
+      const filter = isHighlighted ? "none" : "grayscale(100%)";
+
       const markerHtml = `
         <div style="
           background-color: ${isKingpin ? "#f59e0b" : "#3b82f6"};
@@ -474,7 +510,7 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
           height: 24px;
           border-radius: 50%;
           border: 2px solid #ffffff;
-          box-shadow: 0 0 10px rgba(0,0,0,0.8);
+          box-shadow: ${isHighlighted ? '0 0 10px rgba(0,0,0,0.8)' : 'none'};
           display: flex;
           align-items: center;
           justify-content: center;
@@ -482,6 +518,9 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
           font-weight: bold;
           font-size: 12px;
           cursor: pointer;
+          opacity: ${opacity};
+          filter: ${filter};
+          transition: all 0.3s ease;
         ">
           ${isKingpin ? "★" : "⚲"}
         </div>
@@ -506,7 +545,7 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
       marker.addTo(layer);
       markerByNodeIdRef.current.set(node.id, marker);
     });
-  }, [nodes, onSelectNode]);
+  }, [nodes, onSelectNode, highlightedPatternNodeIds]);
 
   // Phase 2 — graph → map sync: pan to the focused node and pop its marker.
   useEffect(() => {
@@ -577,201 +616,211 @@ export const GeoTimelineView: React.FC<GeoTimelineViewProps> = ({
   }, [isPlaying, playbackSpeed, allEvents.length]);
 
   return (
-    <div ref={viewRef} className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6 bg-slate-950">
+    <div ref={viewRef} className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
       {/* Clean Header Bar without Clutter */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+      <div className="glass-panel border-white/5 rounded-2xl p-4 shadow-xl flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        {/* Left Side: Title */}
         <div className="flex items-center gap-3">
-          <div className="p-3 bg-amber-500/10 rounded-xl text-amber-400 border border-amber-500/20">
-            <Compass className="w-6 h-6" />
+          <div className="p-2.5 bg-primary/10 rounded-xl text-primary border border-primary/20">
+            <Compass className="w-5 h-5" />
           </div>
           <div>
-            <h2 className="text-base font-bold text-slate-100">
-              Geospatial & Spatio-Temporal Intelligence Map
-            </h2>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Accurate incident locations, suspect trajectories, and synchronized chronological playback.
+            <h2 className="text-sm font-bold text-on-surface">Spatial Intelligence Map</h2>
+            <p className="text-[10px] text-on-surface-variant mt-0.5 max-w-sm leading-snug">
+              Secure Local Topology (Titiler & PMTiles). Threat patterns are optically isolated.
             </p>
           </div>
         </div>
 
-        {/* Clean Layer Toggles & Free Map Theme Switcher */}
-        <div className="flex flex-wrap items-center gap-2 bg-slate-950 p-2 rounded-xl border border-slate-800">
-          <button
-            onClick={() => setShowTowers(!showTowers)}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors ${
-              showTowers ? "bg-sky-500/20 text-sky-300 border border-sky-500/40" : "text-slate-500 line-through"
-            }`}
-            title="Toggle Cell Towers and 120° Azimuth Beam Cones"
-          >
-            <Radio className="w-3.5 h-3.5" />
-            <span>Towers ({CELL_TOWER_SECTORS.length})</span>
-          </button>
-
-          <button
-            onClick={() => setShowGeofences(!showGeofences)}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors ${
-              showGeofences ? "bg-rose-500/20 text-rose-300 border border-rose-500/40" : "text-slate-500 line-through"
-            }`}
-            title="Toggle Surveillance Geofences"
-          >
-            <Shield className="w-3.5 h-3.5" />
-            <span>Geofences ({GEOFENCE_ZONES.length})</span>
-          </button>
-
-          <button
-            onClick={() => setShowTrajectories(!showTrajectories)}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors ${
-              showTrajectories ? "bg-amber-500/20 text-amber-300 border border-amber-500/40" : "text-slate-500 line-through"
-            }`}
-            title="Toggle Suspect GPS Trajectory Trails"
-          >
-            <Navigation className="w-3.5 h-3.5" />
-            <span>Trajectories</span>
-          </button>
-
-          {/* Viewport expansion (Req31) */}
-          <button
-            onClick={toggleFullscreen}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors border ${
-              isFullscreen ? "bg-amber-500/20 text-amber-300 border-amber-500/40" : "text-slate-400 hover:text-slate-200 border-transparent"
-            }`}
-            title={isFullscreen ? "Exit full screen" : "Expand map full screen"}
-          >
-            {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Expand className="w-3.5 h-3.5" />}
-            <span>{isFullscreen ? "Exit" : "Expand"}</span>
-          </button>
-
-          {/* Map Theme Switcher (100% Free Open Layers) */}
-          <div className="flex items-center gap-1 pl-2 border-l border-slate-800">
+        {/* Right Side: Re-imagined Segmented Controls */}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Section A: Overlay Analysis Layers */}
+          <div className="flex items-center p-1 bg-surface-container-lowest/50 border border-white/5 rounded-xl shadow-inner">
             <button
-              onClick={() => setMapStyle("dark")}
-              className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${
-                mapStyle === "dark" ? "bg-slate-800 text-amber-400 font-bold border border-slate-700" : "text-slate-400 hover:text-slate-200"
-              }`}
+              onClick={() => setShowTowers(!showTowers)}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1.5 transition-all ${showTowers ? "bg-primary-container text-on-surface shadow-sm" : "text-on-surface-variant hover:text-on-surface"
+                }`}
+              title="Toggle Azimuth Beam Cones"
             >
-              Dark
+              <Radio className="w-3 h-3" />
+              <span>Towers</span>
             </button>
             <button
-              onClick={() => setMapStyle("satellite")}
-              className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${
-                mapStyle === "satellite" ? "bg-slate-800 text-amber-400 font-bold border border-slate-700" : "text-slate-400 hover:text-slate-200"
-              }`}
+              onClick={() => setShowGeofences(!showGeofences)}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1.5 transition-all ${showGeofences ? "bg-error-container text-on-surface shadow-sm" : "text-on-surface-variant hover:text-on-surface"
+                }`}
+              title="Toggle Surveillance Zones"
             >
-              Satellite
+              <Shield className="w-3 h-3" />
+              <span>Geofences</span>
+            </button>
+            <button
+              onClick={() => setShowTrajectories(!showTrajectories)}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1.5 transition-all ${showTrajectories ? "bg-secondary-container text-on-surface shadow-sm" : "text-on-surface-variant hover:text-on-surface"
+                }`}
+            >
+              <Navigation className="w-3 h-3" />
+              <span>Trails</span>
+            </button>
+          </div>
+
+          {/* Section B: Base Maps (Dark option removed) */}
+          <div className="flex items-center p-1 bg-surface-container-lowest/50 border border-white/5 rounded-xl shadow-inner">
+            <button
+              onClick={() => setMapStyle("satellite")}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-mono transition-all ${mapStyle === "satellite" ? "bg-surface-container-high text-primary font-bold shadow-sm" : "text-on-surface-variant hover:text-on-surface"
+                }`}
+            >
+              Sat (COG)
             </button>
             <button
               onClick={() => setMapStyle("streets")}
-              className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${
-                mapStyle === "streets" ? "bg-slate-800 text-amber-400 font-bold border border-slate-700" : "text-slate-400 hover:text-slate-200"
-              }`}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-mono transition-all ${mapStyle === "streets" ? "bg-surface-container-high text-primary font-bold shadow-sm" : "text-on-surface-variant hover:text-on-surface"
+                }`}
             >
-              Streets
+              Streets (PMTiles)
+            </button>
+          </div>
+
+          {/* Section C: Viewport utility */}
+          <div className="flex items-center p-1 bg-surface-container-lowest/50 border border-white/5 rounded-xl">
+            <button
+              onClick={toggleFullscreen}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-mono font-bold flex items-center transition-all ${isFullscreen ? "bg-primary-container text-on-surface" : "text-on-surface-variant hover:text-on-surface"
+                }`}
+              title={isFullscreen ? "Exit Fullscreen" : "Expand Fullscreen"}
+            >
+              {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Expand className="w-3.5 h-3.5" />}
             </button>
           </div>
         </div>
       </div>
 
-      {/* Main Map & Interactive Side Panel */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <div className="lg:col-span-8 bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl h-[560px] relative">
-          <div ref={mapContainerRef} className="w-full h-full z-10" />
+      {/* Main Map & Interactive Side Panel - Reimagined Fullscreen floating style */}
+      <div className="relative w-full h-[650px] lg:h-[750px] rounded-2xl overflow-hidden shadow-2xl glass-panel border border-white/5">
+
+        {/* Full span map */}
+        <div ref={mapContainerRef} className="absolute inset-0 z-10" />
+
+        {/* Collapsible toggle */}
+        <div className="absolute right-0 top-1/2 -translate-y-1/2 z-[450]">
+          <button
+            onClick={() => setIsTimelineOpen(!isTimelineOpen)}
+            className="p-1.5 glass-panel backdrop-blur-md bg-slate-950/80 border-l border-y border-white/10 rounded-l-xl shadow-xl hover:bg-slate-900 transition-colors text-white"
+            title={isTimelineOpen ? "Collapse Timeline" : "Expand Timeline"}
+          >
+            {isTimelineOpen ? <ChevronRight className="w-5 h-5" /> : <ChevronLeft className="w-5 h-5" />}
+          </button>
         </div>
 
-        {/* Chronological Incident Trail & Event Scrubber */}
-        <div className="lg:col-span-4 bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-2xl flex flex-col justify-between h-[560px]">
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-xs font-bold text-slate-200 flex items-center gap-2">
-                <Clock className="w-4 h-4 text-amber-400" />
-                Chronological Trail ({allEvents.length} Events)
-              </h3>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => setIsPlaying(!isPlaying)}
-                  className="p-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-lg transition-colors"
-                  title={isPlaying ? "Pause" : "Play"}
+        {/* Floating Timeline Panel */}
+        <div className={`absolute right-4 top-4 bottom-4 w-96 flex flex-col justify-end z-[400] pointer-events-none transition-transform duration-300 ease-in-out ${isTimelineOpen ? 'translate-x-0' : 'translate-x-[120%]'}`}>
+          <div className="glass-strong border border-white/10 rounded-2xl p-5 shadow-2xl h-full flex flex-col justify-between pointer-events-auto backdrop-blur-3xl bg-slate-950/60">
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-bold text-on-surface flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-primary" />
+                  Chronological Trail ({allEvents.length})
+                </h3>
+
+                {/* Target Isolation Filter */}
+                <select
+                  value={selectedTarget}
+                  onChange={(e) => setSelectedTarget(e.target.value)}
+                  className="bg-surface-container-highest text-on-surface text-[10px] font-mono font-bold rounded-lg px-2 py-1 border border-white/10 outline-none hover:bg-surface-container transition-colors max-w-[120px]"
                 >
-                  {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-                </button>
-                <button
-                  onClick={() => {
-                    setIsPlaying(false);
-                    setCurrentStepIndex(0);
-                  }}
-                  className="p-1.5 text-slate-400 hover:text-slate-200 rounded-lg"
-                  title="Reset"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                </button>
-                {/* Phase 7 Req30 — playback velocity */}
-                <div className="flex items-center gap-0.5 ml-1 bg-slate-950 border border-slate-800 rounded-lg p-0.5" title="Timeline playback speed">
-                  {(["slow", "normal", "fast"] as const).map((s) => (
-                    <button
-                      key={s}
-                      onClick={() => setPlaybackSpeed(s)}
-                      className={`px-1.5 py-1 rounded text-[10px] font-mono capitalize transition-colors ${
-                        playbackSpeed === s ? "bg-amber-500/20 text-amber-300 font-bold" : "text-slate-500 hover:text-slate-300"
-                      }`}
-                      title={s === "slow" ? "Slow · 4s per event" : s === "normal" ? "Normal · 2.5s per event" : "Fast · 1.2s per event"}
-                    >
-                      {s === "slow" ? "0.5×" : s === "normal" ? "1×" : "2×"}
-                    </button>
-                  ))}
+                  <option value="ALL">ALL TARGETS</option>
+                  {uniqueTargets.map(t => <option key={t} value={t}>{t.substring(0, 15)}...</option>)}
+                </select>
+              </div>
+
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex flex-1 items-center gap-1.5 shrink-0">
+                  <button
+                    onClick={() => setIsPlaying(!isPlaying)}
+                    className="p-1.5 bg-primary hover:bg-primary/90 text-on-primary rounded-xl transition-all shadow-[0_0_15px_rgba(226,194,104,0.3)]"
+                    title={isPlaying ? "Pause" : "Play"}
+                  >
+                    {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 translate-x-[1px]" />}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setIsPlaying(false);
+                      setCurrentStepIndex(allEvents.length > 0 ? allEvents.length - 1 : 0);
+                    }}
+                    className="p-1.5 bg-surface-container-high hover:bg-surface-container-highest text-on-surface rounded-xl transition-all"
+                    title="Reset"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                  {/* Phase 7 Req30 — playback velocity */}
+                  <div className="flex items-center gap-0.5 ml-1 bg-surface-container-lowest/50 border border-white/5 rounded-xl p-1" title="Timeline playback speed">
+                    {(["slow", "normal", "fast"] as const).map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => setPlaybackSpeed(s)}
+                        className={`px-1.5 py-1 rounded-md text-[9px] font-mono capitalize transition-all ${playbackSpeed === s ? "bg-primary-container text-on-surface font-bold shadow-sm" : "text-on-surface-variant hover:text-on-surface"
+                          }`}
+                        title={s === "slow" ? "Slow · 4s per event" : s === "normal" ? "Normal · 2.5s per event" : "Fast · 1.2s per event"}
+                      >
+                        {s === "slow" ? "0.5×" : s === "normal" ? "1×" : "2×"}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* Timeline Range Slider */}
-            <input
-              type="range"
-              min="0"
-              max={Math.max(0, allEvents.length - 1)}
-              value={currentStepIndex}
-              onChange={(e) => setCurrentStepIndex(parseInt(e.target.value, 10))}
-              className="w-full accent-amber-500 mb-3 cursor-pointer"
-            />
+              {/* Timeline Range Slider */}
+              <input
+                type="range"
+                min="0"
+                max={Math.max(0, allEvents.length - 1)}
+                value={currentStepIndex}
+                onChange={(e) => setCurrentStepIndex(parseInt(e.target.value, 10))}
+                className="w-full h-1 bg-surface-container-high rounded-full appearance-none mb-4 cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/50"
+              />
 
-            {/* Event List with Click-to-Focus */}
-            <div className="space-y-2.5 overflow-y-auto max-h-[410px] pr-1">
-              {allEvents.map((ev, idx) => {
-                const isActive = idx <= currentStepIndex;
-                const isCurrent = idx === currentStepIndex;
-                return (
-                  <div
-                    key={ev.id}
-                    onClick={() => setCurrentStepIndex(idx)}
-                    className={`p-3 rounded-xl border text-xs cursor-pointer transition-all ${
-                      isCurrent
-                        ? "bg-slate-800 border-amber-500 shadow-lg scale-[1.01]"
+              {/* Event List with Click-to-Focus */}
+              <div className="space-y-3 overflow-y-auto max-h-[550px] pr-2 custom-scrollbar">
+                {allEvents.map((ev, idx) => {
+                  const isActive = idx <= currentStepIndex;
+                  const isCurrent = idx === currentStepIndex;
+                  return (
+                    <div
+                      key={ev.id}
+                      onClick={() => setCurrentStepIndex(idx)}
+                      className={`p-3.5 rounded-xl border text-xs cursor-pointer transition-all ${isCurrent
+                        ? "bg-surface-container border-primary shadow-[0_0_15px_rgba(226,194,104,0.15)] scale-[1.01]"
                         : isActive
-                        ? "bg-slate-950/80 border-slate-800 text-slate-300 hover:border-slate-700"
-                        : "bg-slate-950/30 border-slate-900 opacity-40 text-slate-600"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span
-                        className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold"
-                        style={{
-                          backgroundColor: `${ev.color}20`,
-                          color: ev.color,
-                          border: `1px solid ${ev.color}40`,
-                        }}
-                      >
-                        {ev.badge}
-                      </span>
-                      <span className="text-[10px] font-mono text-slate-500">
-                        {new Date(ev.timestamp).toLocaleDateString()} {new Date(ev.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </span>
+                          ? "bg-surface-container-low border-white/5 text-on-surface-variant hover:bg-surface-container"
+                          : "bg-surface-container-lowest border-transparent opacity-40 text-on-surface-variant/50"
+                        }`}
+                    >
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span
+                          className="px-2 py-0.5 rounded text-[9px] font-mono font-bold"
+                          style={{
+                            backgroundColor: `${ev.color}20`,
+                            color: ev.color,
+                            border: `1px solid ${ev.color}40`,
+                          }}
+                        >
+                          {ev.badge}
+                        </span>
+                        <span className="text-[10px] font-mono opacity-60">
+                          {new Date(ev.timestamp).toLocaleDateString()} {new Date(ev.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      </div>
+                      <strong className="block text-on-surface font-semibold mb-1 text-sm">{ev.title}</strong>
+                      <div className="text-[10px] font-mono text-primary mb-1.5 flex items-center gap-1.5">
+                        <MapPin className="w-3.5 h-3.5" />
+                        <span>{ev.areaName}</span>
+                      </div>
+                      <p className="text-[11px] opacity-80 leading-relaxed font-sans">{ev.description}</p>
                     </div>
-                    <strong className="block text-slate-100 font-semibold mb-0.5">{ev.title}</strong>
-                    <div className="text-[10px] font-mono text-amber-400/90 mb-1 flex items-center gap-1">
-                      <MapPin className="w-3 h-3" />
-                      <span>{ev.areaName}</span>
-                    </div>
-                    <p className="text-[11px] text-slate-400 leading-normal">{ev.description}</p>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>

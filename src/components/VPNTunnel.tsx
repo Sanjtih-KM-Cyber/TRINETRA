@@ -202,22 +202,23 @@ export const VPNTunnel: React.FC<VPNTunnelProps> = ({
     <div className="relative">
       <canvas
         ref={canvasRef}
-        className="w-full h-auto rounded-xl bg-slate-950/60 border border-slate-800"
+        className="w-full h-auto rounded-xl glass-strong border border-white/5 transition-all duration-300 ease-in-out shadow-inner"
         style={{ maxWidth: width }}
+        role="img"
+        aria-label={connected ? "Encrypted tunnel active" : "Tunnel disconnected"}
       />
       <div className="absolute top-3 left-3 flex items-center gap-2 pointer-events-none">
         <div
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold border ${
-            connected
-              ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
-              : "bg-slate-800/60 text-slate-400 border-slate-700"
-          }`}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-mono font-bold border tracking-wider transition-all duration-300 ease-in-out ${connected
+              ? "bg-success/20 text-success border-success/40 shadow-[0_0_10px_rgba(var(--color-success),0.2)]"
+              : "glass-panel text-on-surface-variant border-white/10"
+            }`}
         >
           {connected ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Wifi className="w-3.5 h-3.5" />}
           <span>{connected ? "TUNNEL ACTIVE · TLS 1.3" : "DISCONNECTED"}</span>
         </div>
         {connected && latency > 0 && (
-          <span className="text-[10px] font-mono text-slate-400">⚡ {latency}ms · AES-256-GCM</span>
+          <span className="text-[10px] font-mono text-success opacity-80 backdrop-blur-md px-2 py-0.5 rounded border border-success/20 bg-success/5">⚡ {latency}ms · AES-256-GCM</span>
         )}
       </div>
     </div>

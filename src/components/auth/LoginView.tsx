@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { vpnApi, isDemoMode } from "../../services/vpn";
+import { BlockedAccountView, getBlockedId, setBlockedId, clearBlockedId } from "./BlockedAccountView";
 import type { UserRole } from "../../data/roles";
-import { REQUESTABLE_ROLES, KNOWN_STATES, orgOf } from "../../data/roles";
+import { REQUESTABLE_ROLES, KNOWN_STATES, STATE_META, orgOf } from "../../data/roles";
 import { detectGovTenant } from "../../data/departments";
 import {
   Shield,
@@ -16,7 +17,6 @@ import {
   ArrowLeft,
   Eye,
   EyeOff,
-  Briefcase,
   Layers,
   FileCheck,
   ShieldAlert,
@@ -31,27 +31,27 @@ export const LoginView: React.FC = () => {
   const [viewMode, setViewMode] = useState<"signin" | "request">("signin");
 
   // Sign in form state (Phase 1: badge + PIN + tunnel-handshake OTP)
+  // NOTE: OTP is NEVER auto-filled — officer must paste it manually from
+  // the VPN tunnel screen. Any legacy stored OTP is cleared on mount.
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
-  const [otp, setOtp] = useState(() => {
-    try {
-      return sessionStorage.getItem("crim_intel_vpn_otp") || "";
-    } catch {
-      return "";
-    }
-  });
+  const [otp, setOtp] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [idleSecondsLeft, setIdleSecondsLeft] = useState(120);
+  const [idleSecondsLeft, setIdleSecondsLeft] = useState(30);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [accountStatusNotice, setAccountStatusNotice] = useState<{
     status: "PENDING" | "REJECTED" | "SUSPENDED";
     message: string;
   } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Lockout screen: persists across refresh via localStorage.
+  const [blockedId, setBlockedIdState] = useState<string | null>(() => getBlockedId());
+  const [blockedReason, setBlockedReason] = useState<string>("");
 
   // Request access form state
   // 1. IDENTITY
   const [reqFullName, setReqFullName] = useState("");
+  // Auto-generated from name + role (+ state); readonly in the form.
   const [reqEmail, setReqEmail] = useState("");
   const [reqBadgeId, setReqBadgeId] = useState("");
 
@@ -61,8 +61,37 @@ export const LoginView: React.FC = () => {
   const [reqRole, setReqRole] = useState<UserRole>("CBI_LEAD");
   const [reqState, setReqState] = useState<string>("MAHARASHTRA");
 
-  // 3. ACCESS JUSTIFICATION
-  const [reqReason, setReqReason] = useState("");
+  // Auto-generation mirrors the server minting rules (final numeric suffix
+  // is assigned server-side; this preview uses the same slug/domain scheme).
+  const generatedCreds = useMemo(() => {
+    const trimmed = reqFullName.trim();
+    if (trimmed.length < 2) return null;
+    const slug =
+      trimmed.toLowerCase().replace(/[^a-z]+/g, ".").replace(/^\.|\.$/g, "").slice(0, 40) || "officer";
+    const org = orgOf(reqRole);
+    const st = org === "POLICE" || org === "CID" ? reqState : undefined;
+    const domain =
+      org === "POLICE"
+        ? STATE_META[st!]?.domain || "police.gov.in"
+        : org === "CBI"
+          ? "cbi.gov.in"
+          : org === "NIA"
+            ? "nia.gov.in"
+            : "cid.gov.in";
+    const short = org === "POLICE" ? STATE_META[st!]?.short || "ST" : org === "CID" && st ? `CID-${STATE_META[st]?.short || "ST"}` : org;
+    const func = reqRole.split("_").slice(1).join("").slice(0, 3).toUpperCase() || "GEN";
+    const suffix = Math.floor(100 + Math.random() * 900);
+    return {
+      email: `${slug}.${suffix}@${domain}`.toLowerCase(),
+      badgeId: `${short}-${func}-${Math.floor(100 + Math.random() * 900)}`,
+    };
+  }, [reqFullName, reqRole, reqState]);
+
+  // Keep the submitted values in sync with the generated preview.
+  useEffect(() => {
+    setReqEmail(generatedCreds ? generatedCreds.email : "");
+    setReqBadgeId(generatedCreds ? generatedCreds.badgeId : "");
+  }, [generatedCreds]);
 
   // 4. SECURITY
   const [reqPassword, setReqPassword] = useState("");
@@ -88,15 +117,24 @@ export const LoginView: React.FC = () => {
   const isSignInFormValid =
     identifier.trim().length > 0 && password.length > 0 && /^\d{6}$/.test(otp);
 
-  // Phase 1 Req4 — idle timer on the Officer Sign-In screen: 2 min of no
-  // mouse/keyboard/touch activity tears down the tunnel and routes back to
-  // the VPN gateway (App re-probes vpnApi.status() after reload).
+  // Phase 1 Req4 — Sign-In screen timeout: 30s of no mouse/keyboard/touch
+  // activity tears down the tunnel and routes back to the VPN gateway
+  // (App re-probes vpnApi.status() after reload).
   const idleTimerRef = useRef<number | null>(null);
   const idleCountdownRef = useRef<number | null>(null);
+  // Clear any legacy auto-stored OTP so the field always starts empty.
+  useEffect(() => {
+    try {
+      sessionStorage.removeItem("crim_intel_vpn_otp");
+      sessionStorage.removeItem("crim_intel_vpn_otp_exp");
+    } catch {
+      /* noop */
+    }
+  }, []);
   useEffect(() => {
     if (viewMode !== "signin" || submissionReceipt) return;
-    setIdleSecondsLeft(120);
-    const reset = () => setIdleSecondsLeft(120);
+    setIdleSecondsLeft(30);
+    const reset = () => setIdleSecondsLeft(30);
     const events: Array<keyof WindowEventMap> = ["mousemove", "mousedown", "keydown", "touchstart", "wheel"];
     events.forEach((ev) => window.addEventListener(ev, reset, { passive: true }));
     idleCountdownRef.current = window.setInterval(() => {
@@ -121,8 +159,7 @@ export const LoginView: React.FC = () => {
 
   const isRequestFormValid =
     reqFullName.trim().length > 0 &&
-    reqEmail.trim().length > 0 &&
-    reqBadgeId.trim().length > 0 &&
+    generatedCreds !== null &&
     reqAgency.trim().length > 0 &&
     reqDepartment.trim().length > 0 &&
     isPasswordValid &&
@@ -138,15 +175,18 @@ export const LoginView: React.FC = () => {
 
     try {
       await login(identifier.trim(), password, otp);
+      // Login succeeded — any prior block for this identifier is over.
+      if (getBlockedId() === identifier.trim()) clearBlockedId();
     } catch (err: any) {
       const status = err.data?.status;
-      // Wrong-OTP lockout: tunnel is torn down and the officer returns to it.
-      if (status === "LOCKED" || err.message?.toLowerCase().includes("locked")) {
-        setLoginError(
-          err.message || "Account locked after repeated wrong OTP attempts. Contact your department Admin."
-        );
-        await vpnApi.disconnect().catch(() => undefined);
-        setTimeout(() => window.location.reload(), 2500);
+      const msg = String(err.message || "").toLowerCase();
+      // Wrong-OTP lockout / suspended: land on the persistent blocked
+      // screen (no tunnel teardown — the officer stays here and polls).
+      if (status === "LOCKED" || status === "SUSPENDED" || msg.includes("locked") || msg.includes("blocked")) {
+        const id = identifier.trim();
+        setBlockedId(id);
+        setBlockedIdState(id);
+        setBlockedReason(err.message || "Your account is blocked. Your department Admin will unblock it — keep this screen open.");
         return;
       }
       if (status === "PENDING" || err.message?.toLowerCase().includes("pending")) {
@@ -175,7 +215,7 @@ export const LoginView: React.FC = () => {
   const handleRequestSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!reqFullName.trim() || !reqEmail.trim() || !reqBadgeId.trim() || !reqAgency.trim() || !reqDepartment.trim()) {
+    if (!reqFullName.trim() || !generatedCreds || !reqAgency.trim() || !reqDepartment.trim()) {
       setReqError("Please complete all required fields marked with an asterisk (*).");
       return;
     }
@@ -194,17 +234,17 @@ export const LoginView: React.FC = () => {
     setReqError(null);
 
     try {
-      const isPoliceRole = orgOf(reqRole) === "POLICE";
+      const isStatewiseRole = orgOf(reqRole) === "POLICE" || orgOf(reqRole) === "CID";
       const res: any = await requestAccess({
         full_name: reqFullName.trim(),
-        official_id: reqBadgeId.trim(),
-        official_email: reqEmail.trim().toLowerCase(),
+        official_id: generatedCreds.badgeId,
+        official_email: generatedCreds.email,
         agency: reqAgency.trim(),
         designation: "Investigative Officer",
         department: reqDepartment.trim(),
         requested_role: reqRole,
-        state: isPoliceRole ? reqState : undefined,
-        reason_for_access: reqReason.trim() || "Operational syndicate network analysis, evidence ingestion, and case collaboration.",
+        state: isStatewiseRole ? reqState : undefined,
+        reason_for_access: "Access requested via Officer Sign-In clearance tab; pending department Admin vetting.",
         password: reqPassword,
       });
 
@@ -215,12 +255,12 @@ export const LoginView: React.FC = () => {
       setSubmissionReceipt({
         requestId: generatedReqId,
         fullName: reqFullName.trim(),
-        email: reqEmail.trim().toLowerCase(),
-        badgeId: reqBadgeId.trim(),
+        email: generatedCreds.email,
+        badgeId: generatedCreds.badgeId,
         agency: reqAgency.trim(),
         department: reqDepartment.trim(),
         requestedRole: reqRole,
-        state: orgOf(reqRole) === "POLICE" ? reqState : undefined,
+        state: orgOf(reqRole) === "POLICE" || orgOf(reqRole) === "CID" ? reqState : undefined,
         timestamp: new Date().toLocaleString("en-IN", {
           year: "numeric",
           month: "short",
@@ -238,7 +278,6 @@ export const LoginView: React.FC = () => {
       setReqBadgeId("");
       setReqAgency("");
       setReqDepartment("");
-      setReqReason("");
       setReqPassword("");
       setReqConfirmPassword("");
     } catch (err: any) {
@@ -256,40 +295,63 @@ export const LoginView: React.FC = () => {
     setReqError(null);
   };
 
+  // Persistent lockout screen (survives refresh + retried logins).
+  if (blockedId) {
+    return (
+      <BlockedAccountView
+        identifier={blockedId}
+        reason={blockedReason}
+        onBackToLogin={() => {
+          clearBlockedId();
+          setBlockedIdState(null);
+        }}
+        onUseDifferentAccount={() => {
+          clearBlockedId();
+          setBlockedIdState(null);
+          setBlockedReason("");
+          setIdentifier("");
+          setPassword("");
+          setOtp("");
+        }}
+      />
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between selection:bg-amber-500/30 selection:text-amber-200">
+    <div className="min-h-screen bg-surface-container-lowest text-on-surface flex flex-col justify-between selection:bg-primary/30 selection:text-primary">
       {/* Top Bar Header */}
-      <header className="border-b border-slate-850 bg-slate-950/95 backdrop-blur-md px-4 sm:px-8 py-3.5 flex items-center justify-between z-10 shrink-0">
+      <header className="border-b border-white/5 glass-strong px-4 sm:px-8 py-3.5 flex items-center justify-between z-10 shrink-0">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 font-mono font-black text-sm shadow-sm">
+          <div className="w-9 h-9 rounded-xl glass-panel border border-primary/30 flex items-center justify-center text-primary font-mono font-black text-sm shadow-[0_0_15px_rgba(var(--color-primary),0.3)]">
             <Shield className="w-5 h-5" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="font-bold text-sm sm:text-base tracking-tight text-slate-100">
+              <span className="font-bold text-sm sm:text-base tracking-tight text-on-surface">
                 TRINETRA OS
               </span>
-              <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-slate-900 border border-slate-750 text-amber-400 font-semibold uppercase tracking-wider">
+              <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-surface-container-lowest border border-white/10 text-primary font-semibold uppercase tracking-wider">
                 RESTRICTED GOV ACCESS
               </span>
             </div>
-            <p className="text-[11px] text-slate-400 hidden sm:block">
+            <p className="text-[11px] text-on-surface-variant hidden sm:block">
               National Security Intelligence & Criminal Syndicate Interdiction Platform
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 text-xs font-mono text-slate-400 bg-slate-900/80 px-2.5 py-1 rounded-lg border border-slate-800">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 animate-pulse" />
-          <span className="text-[11px] tracking-wide text-slate-300">SECURE GATEWAY</span>
+        <div className="flex items-center gap-2 text-xs font-mono text-on-surface-variant glass-panel px-2.5 py-1 rounded-lg border border-white/10">
+          <span className="w-2 h-2 rounded-full bg-success shrink-0 animate-pulse" />
+          <span className="text-[11px] tracking-wide text-on-surface">SECURE GATEWAY</span>
         </div>
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 flex flex-col justify-center items-center px-4 py-8 sm:py-12">
+      <main className="flex-1 flex flex-col justify-center items-center px-4 py-8 sm:py-12 relative">
+        <div className="absolute inset-0 bg-primary/2 blur-[100px] pointer-events-none"></div>
         {/* ================= 1. SUBMISSION RECEIPT VIEW ================= */}
         {submissionReceipt ? (
-          <div className="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 animate-in fade-in zoom-in-95 duration-200">
+          <div className="w-full max-w-lg glass-panel border border-white/10 rounded-2xl shadow-2xl p-6 sm:p-8 animate-in fade-in zoom-in-95 duration-200 relative z-10">
             <div className="flex items-center gap-3 mb-5 pb-4 border-b border-slate-800">
               <div className="w-11 h-11 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shrink-0">
                 <CheckCircle2 className="w-6 h-6" />
@@ -380,13 +442,13 @@ export const LoginView: React.FC = () => {
           </div>
         ) : viewMode === "signin" ? (
           /* ================= 2. OFFICER SIGN IN VIEW ================= */
-          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 animate-in fade-in duration-150">
+          <div className="w-full max-w-md glass-panel border border-white/10 rounded-2xl shadow-2xl p-6 sm:p-8 animate-in fade-in duration-150 relative z-10">
             {/* Phase 1 Req3 — in-flow tabs inside the Login view */}
-            <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-slate-950 border border-slate-800 mb-6">
+            <div className="grid grid-cols-2 gap-1 p-1 rounded-xl glass-strong border border-white/5 mb-6">
               <button
                 type="button"
                 onClick={() => setViewMode("signin")}
-                className="px-3 py-2 rounded-lg text-xs font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                className="px-3 py-2 rounded-lg text-xs font-bold glass-panel text-primary border border-primary/30"
               >
                 Officer Sign-In
               </button>
@@ -398,17 +460,17 @@ export const LoginView: React.FC = () => {
                   setAccountStatusNotice(null);
                   setReqError(null);
                 }}
-                className="px-3 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+                className="px-3 py-2 rounded-lg text-xs font-semibold text-on-surface-variant hover:text-on-surface transition-colors"
               >
                 Request Access
               </button>
             </div>
             <div className="mb-6 text-center">
-              <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 mb-3">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl glass-panel border border-primary/20 text-primary mb-3 shadow-[0_0_15px_rgba(var(--color-primary),0.2)]">
                 <Lock className="w-5 h-5" />
               </div>
-              <h2 className="text-xl font-bold text-slate-100 tracking-tight">Officer Sign In</h2>
-              <p className="text-xs text-slate-400 mt-1">
+              <h2 className="text-xl font-bold text-on-surface tracking-tight">Officer Sign In</h2>
+              <p className="text-xs text-on-surface-variant mt-1">
                 Badge + PIN + tunnel-handshake OTP (issued on the VPN screen).
               </p>
               <p className="text-[11px] font-mono text-slate-500 mt-1.5 flex items-center justify-center gap-1">
@@ -420,11 +482,10 @@ export const LoginView: React.FC = () => {
             {/* Account Status Notices */}
             {accountStatusNotice && (
               <div
-                className={`p-3.5 rounded-xl mb-5 text-xs flex items-start gap-2.5 border ${
-                  accountStatusNotice.status === "PENDING"
-                    ? "bg-amber-500/10 border-amber-500/30 text-amber-300"
-                    : "bg-rose-500/10 border-rose-500/30 text-rose-300"
-                }`}
+                className={`p-3.5 rounded-xl mb-5 text-xs flex items-start gap-2.5 border ${accountStatusNotice.status === "PENDING"
+                  ? "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                  : "bg-rose-500/10 border-rose-500/30 text-rose-300"
+                  }`}
               >
                 <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
                 <div>
@@ -432,8 +493,8 @@ export const LoginView: React.FC = () => {
                     {accountStatusNotice.status === "PENDING"
                       ? "Access Pending Approval"
                       : accountStatusNotice.status === "REJECTED"
-                      ? "Access Request Rejected"
-                      : "Account Suspended"}
+                        ? "Access Request Rejected"
+                        : "Account Suspended"}
                   </strong>
                   <span className="text-[11px] leading-normal">{accountStatusNotice.message}</span>
                 </div>
@@ -534,7 +595,7 @@ export const LoginView: React.FC = () => {
                   <span className="ml-1 font-normal text-slate-500">6-digit code from VPN handshake</span>
                 </label>
                 <div className="relative">
-                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <KeyRound className="w-4 h-4 text-on-surface-variant absolute left-3.5 top-1/2 -translate-y-1/2" />
                   <input
                     id="tunnel-otp"
                     type="text"
@@ -548,7 +609,8 @@ export const LoginView: React.FC = () => {
                       if (loginError) setLoginError(null);
                     }}
                     placeholder="000000"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 focus:border-amber-500 font-mono tracking-[0.35em] transition-colors"
+                    aria-label="6-digit tunnel one-time code"
+                    className="w-full bg-surface-container-lowest border border-outline rounded-md pl-10 pr-3.5 py-2.5 text-xs sm:text-sm text-on-surface placeholder-on-surface-variant/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface-container-low font-mono tracking-[0.5em] transition-all duration-300 ease-in-out"
                   />
                 </div>
               </div>
@@ -581,23 +643,23 @@ export const LoginView: React.FC = () => {
           </div>
         ) : (
           /* ================= 3. REQUEST ACCESS VIEW ================= */
-          <div className="w-full max-w-xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 animate-in fade-in duration-150">
+          <div className="w-full max-w-xl glass-panel border border-white/10 rounded-2xl shadow-2xl p-6 sm:p-8 animate-in fade-in duration-150 relative z-10">
             {/* Phase 1 Req3 — same in-flow tabs on the request side */}
-            <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-slate-950 border border-slate-800 mb-6">
+            <div className="grid grid-cols-2 gap-1 p-1 rounded-xl glass-strong border border-white/5 mb-6">
               <button
                 type="button"
                 onClick={() => {
                   setViewMode("signin");
                   setReqError(null);
                 }}
-                className="px-3 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+                className="px-3 py-2 rounded-lg text-xs font-semibold text-on-surface-variant hover:text-on-surface transition-colors"
               >
                 Officer Sign-In
               </button>
               <button
                 type="button"
                 onClick={() => setViewMode("request")}
-                className="px-3 py-2 rounded-lg text-xs font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                className="px-3 py-2 rounded-lg text-xs font-bold glass-panel text-primary border border-primary/30"
               >
                 Request Access
               </button>
@@ -636,7 +698,7 @@ export const LoginView: React.FC = () => {
               <div className="space-y-3">
                 <div className="flex items-center gap-2 text-xs font-bold text-amber-400 uppercase tracking-wider">
                   <User className="w-3.5 h-3.5" />
-                  <span>Identity</span>
+                  <span>1 · Identity</span>
                 </div>
 
                 <div>
@@ -650,39 +712,8 @@ export const LoginView: React.FC = () => {
                     value={reqFullName}
                     onChange={(e) => setReqFullName(e.target.value)}
                     placeholder="e.g. Officer Vikramaditya Rathore"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 transition-colors"
+                    className="w-full bg-surface-container-lowest border border-white/10 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-on-surface placeholder-on-surface-variant focus:outline-none focus:ring-1 focus:ring-primary transition-colors"
                   />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label htmlFor="req-email" className="block text-xs font-semibold text-slate-300 mb-1">
-                      Official Email <span className="text-amber-400">*</span>
-                    </label>
-                    <input
-                      id="req-email"
-                      type="email"
-                      required
-                      value={reqEmail}
-                      onChange={(e) => setReqEmail(e.target.value)}
-                      placeholder="officer@agency.gov.in"
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono transition-colors"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="req-badge" className="block text-xs font-semibold text-slate-300 mb-1">
-                      Badge / Employee ID <span className="text-amber-400">*</span>
-                    </label>
-                    <input
-                      id="req-badge"
-                      type="text"
-                      required
-                      value={reqBadgeId}
-                      onChange={(e) => setReqBadgeId(e.target.value)}
-                      placeholder="e.g. cbi_lead_01 / police_kar_lead"
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono transition-colors"
-                    />
-                  </div>
                 </div>
               </div>
 
@@ -690,7 +721,7 @@ export const LoginView: React.FC = () => {
               <div className="space-y-3 pt-3 border-t border-slate-800">
                 <div className="flex items-center gap-2 text-xs font-bold text-amber-400 uppercase tracking-wider">
                   <Building className="w-3.5 h-3.5" />
-                  <span>Organization</span>
+                  <span>2 · Organization</span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -705,7 +736,7 @@ export const LoginView: React.FC = () => {
                       value={reqAgency}
                       onChange={(e) => setReqAgency(e.target.value)}
                       placeholder="e.g. Central Bureau of Investigation"
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 transition-colors"
+                      className="w-full bg-surface-container-lowest border border-white/10 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-on-surface placeholder-on-surface-variant focus:outline-none focus:ring-1 focus:ring-primary transition-colors"
                     />
                   </div>
                   <div>
@@ -719,7 +750,7 @@ export const LoginView: React.FC = () => {
                       value={reqDepartment}
                       onChange={(e) => setReqDepartment(e.target.value)}
                       placeholder="e.g. Special Task Force & Cyber"
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 transition-colors"
+                      className="w-full bg-surface-container-lowest border border-white/10 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-on-surface placeholder-on-surface-variant focus:outline-none focus:ring-1 focus:ring-primary transition-colors"
                     />
                   </div>
                 </div>
@@ -735,11 +766,10 @@ export const LoginView: React.FC = () => {
                       {REQUESTABLE_ROLES.map((value) => (
                         <label
                           key={value}
-                          className={`px-2.5 py-2 rounded-lg border text-[11px] cursor-pointer transition-all flex items-center gap-2 ${
-                            reqRole === value
-                              ? "bg-amber-500/10 border-amber-500/40 text-slate-100"
-                              : "bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700"
-                          }`}
+                          className={`px-2.5 py-2 rounded-lg border text-[11px] cursor-pointer transition-all flex items-center gap-2 ${reqRole === value
+                              ? "bg-primary/20 border-primary/40 text-on-surface"
+                              : "glass-panel border-white/5 text-on-surface-variant hover:border-white/20"
+                            }`}
                         >
                           <input
                             type="radio"
@@ -747,7 +777,7 @@ export const LoginView: React.FC = () => {
                             value={value}
                             checked={reqRole === value}
                             onChange={() => setReqRole(value)}
-                            className="text-amber-500 focus:ring-amber-500"
+                            className="text-primary focus:ring-primary"
                           />
                           <span className="font-semibold font-mono">{value}</span>
                         </label>
@@ -757,7 +787,7 @@ export const LoginView: React.FC = () => {
                       Gov-ID prefix drives tenant: cbi_ / nia_ / cid_ / police_kar_ / police_mah_. Use CID_CYBER for cid_cyber_01.
                     </p>
 
-                    {orgOf(reqRole) === "POLICE" && (
+                    {(orgOf(reqRole) === "POLICE" || orgOf(reqRole) === "CID") && (
                       <div>
                         <label htmlFor="req-state" className="block text-xs font-semibold text-slate-300 mb-1">
                           State Jurisdiction <span className="text-amber-400">*</span>
@@ -766,7 +796,7 @@ export const LoginView: React.FC = () => {
                           id="req-state"
                           value={reqState}
                           onChange={(e) => setReqState(e.target.value)}
-                          className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                          className="w-full bg-surface-container-lowest border border-white/10 rounded-xl px-3.5 py-2.5 text-xs text-on-surface focus:outline-none focus:ring-1 focus:ring-primary"
                         >
                           {KNOWN_STATES.map((s) => (
                             <option key={s.code} value={s.code}>
@@ -781,10 +811,10 @@ export const LoginView: React.FC = () => {
                     )}
 
                     {/* Policy note regarding Admin Role */}
-                    <div className="p-2.5 rounded-xl bg-slate-950/40 border border-slate-800/80 text-[11px] text-slate-400 flex items-start gap-2">
-                      <Layers className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                    <div className="p-2.5 rounded-xl glass-panel border border-white/5 text-[11px] text-on-surface-variant flex items-start gap-2">
+                      <Layers className="w-4 h-4 text-on-surface-variant shrink-0 mt-0.5" />
                       <div>
-                        <span className="font-semibold text-slate-300">ADMIN PRIVILEGES: </span>
+                        <span className="font-semibold text-on-surface">ADMIN PRIVILEGES: </span>
                         <span>
                           CBI/NIA/CID/State-Police Admin roles are provisioned strictly by existing department Admins within the same tenant.
                         </span>
@@ -794,33 +824,37 @@ export const LoginView: React.FC = () => {
                 </div>
               </div>
 
-              {/* GROUP 3: ACCESS JUSTIFICATION */}
+              {/* GROUP 3: AUTO-GENERATED CREDENTIALS */}
               <div className="space-y-3 pt-3 border-t border-slate-800">
                 <div className="flex items-center gap-2 text-xs font-bold text-amber-400 uppercase tracking-wider">
-                  <Briefcase className="w-3.5 h-3.5" />
-                  <span>Access Justification</span>
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>3 · Official Credentials (auto-generated)</span>
                 </div>
 
-                <div>
-                  <label htmlFor="req-reason" className="block text-xs font-semibold text-slate-300 mb-1">
-                    Reason for Access <span className="text-slate-400 font-normal">(Operational Justification)</span>
-                  </label>
-                  <textarea
-                    id="req-reason"
-                    rows={2}
-                    value={reqReason}
-                    onChange={(e) => setReqReason(e.target.value)}
-                    placeholder="Specify case assignment, operational jurisdiction, or investigative interdiction tasks..."
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 transition-colors"
-                  />
-                </div>
+                {generatedCreds ? (
+                  <div className="rounded-xl glass-panel border border-primary/30 p-3.5 font-mono text-xs space-y-1.5">
+                    <div className="text-on-surface">
+                      Official Email: <strong className="text-primary">{generatedCreds.email}</strong>
+                    </div>
+                    <div className="text-on-surface">
+                      Badge / Employee ID: <strong className="text-primary">{generatedCreds.badgeId}</strong>
+                    </div>
+                    <p className="text-[10px] font-sans text-slate-500">
+                      Generated from your name and operation role. Final numbers are assigned on submission.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-slate-500">
+                    Enter your full name and pick an operation role above — your official email and employee ID generate automatically.
+                  </p>
+                )}
               </div>
 
               {/* GROUP 4: SECURITY */}
               <div className="space-y-3 pt-3 border-t border-slate-800">
                 <div className="flex items-center gap-2 text-xs font-bold text-amber-400 uppercase tracking-wider">
                   <Lock className="w-3.5 h-3.5" />
-                  <span>Security</span>
+                  <span>4 · Set Password</span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -836,7 +870,7 @@ export const LoginView: React.FC = () => {
                         value={reqPassword}
                         onChange={(e) => setReqPassword(e.target.value)}
                         placeholder="Min. 6 characters"
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-3.5 pr-10 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono transition-colors"
+                        className="w-full bg-surface-container-lowest border border-white/10 rounded-xl pl-3.5 pr-10 py-2.5 text-xs sm:text-sm text-on-surface placeholder-on-surface-variant focus:outline-none focus:ring-1 focus:ring-primary font-mono transition-colors"
                       />
                       <button
                         type="button"
@@ -860,13 +894,12 @@ export const LoginView: React.FC = () => {
                         value={reqConfirmPassword}
                         onChange={(e) => setReqConfirmPassword(e.target.value)}
                         placeholder="Repeat password"
-                        className={`w-full bg-slate-950 border rounded-xl pl-3.5 pr-10 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 font-mono transition-colors ${
-                          reqConfirmPassword.length > 0
+                        className={`w-full bg-surface-container-lowest border rounded-xl pl-3.5 pr-10 py-2.5 text-xs sm:text-sm text-on-surface placeholder-on-surface-variant focus:outline-none focus:ring-1 font-mono transition-colors ${reqConfirmPassword.length > 0
                             ? passwordsMatch
-                              ? "border-emerald-500/60 focus:ring-emerald-500"
-                              : "border-rose-500/60 focus:ring-rose-500"
-                            : "border-slate-700 focus:ring-amber-500"
-                        }`}
+                              ? "border-success/60 focus:ring-success"
+                              : "border-error/60 focus:ring-error"
+                            : "border-white/10 focus:ring-primary"
+                          }`}
                       />
                       <button
                         type="button"
@@ -898,7 +931,7 @@ export const LoginView: React.FC = () => {
               <button
                 type="submit"
                 disabled={isSubmitting || !isRequestFormValid}
-                className="w-full mt-4 py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs sm:text-sm transition-all shadow-md shadow-amber-500/10 flex items-center justify-center gap-2 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
+                className="btn-primary w-full mt-4 flex items-center justify-center gap-2 font-bold py-3 px-4 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isSubmitting ? (
                   <>
@@ -928,9 +961,9 @@ export const LoginView: React.FC = () => {
       </main>
 
       {/* Clean Enterprise Footer */}
-      <footer className="border-t border-slate-850 bg-slate-950/95 backdrop-blur-md px-4 sm:px-8 py-3 text-xs text-slate-400 flex flex-col sm:flex-row items-center justify-between gap-2 z-10 shrink-0">
+      <footer className="border-t border-white/5 glass-strong px-4 sm:px-8 py-3 text-xs text-on-surface-variant flex flex-col sm:flex-row items-center justify-between gap-2 z-10 shrink-0">
         <span>TRINETRA OS • Restricted to Authorized Law Enforcement Personnel</span>
-        <span className="font-mono text-[11px] text-slate-400">
+        <span className="font-mono text-[11px] text-on-surface-variant">
           Section 65B Indian Evidence Act Compliant
         </span>
       </footer>

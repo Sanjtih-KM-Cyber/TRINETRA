@@ -11,6 +11,7 @@ import {
   reconstructText,
   reconstructCdr,
   reconstructFinancial,
+  reconstructReadableText,
   MAX_RECON_ENTITIES,
   MAX_RECON_LINKS,
 } from "./reconstructor";
@@ -111,8 +112,19 @@ export async function processSource(
   unresolved: string[];
   enrichment: "LLM_ASSIST" | "RULES_ONLY";
   provider: string;
+  readable: string;
+  rawText: string;
 }> {
   const evidenceRef = opts.fileName || opts.url || source;
+  const readableOf = (t: string) => {
+    try {
+      const r = reconstructReadableText(t || "");
+      const joined = r.paragraphs.join("\n\n");
+      return joined.length > 40 ? joined.slice(0, MAX_BATCH_CONTENT_CHARS) : (t || "").slice(0, MAX_BATCH_CONTENT_CHARS);
+    } catch {
+      return (t || "").slice(0, MAX_BATCH_CONTENT_CHARS);
+    }
+  };
 
   if (source === "FIR" || source === "INTEL_REPORT" || source === "CYBER_LOG") {
     const docName =
@@ -121,6 +133,7 @@ export async function processSource(
     return {
       entities: r.entities, links: r.links, truncated: r.truncated, note: r.note,
       unresolved: r.unresolved, enrichment: r.enrichment, provider: r.provider,
+      readable: readableOf(content), rawText: content || "",
     };
   }
 
@@ -129,6 +142,7 @@ export async function processSource(
     return {
       entities: r.entities, links: r.links, truncated: false, note: r.note,
       unresolved: r.unresolved, enrichment: "RULES_ONLY", provider: "rules engine",
+      readable: readableOf(content), rawText: content || "",
     };
   }
 
@@ -137,6 +151,7 @@ export async function processSource(
     return {
       entities: r.entities, links: r.links, truncated: false, note: r.note,
       unresolved: r.unresolved, enrichment: "RULES_ONLY", provider: "rules engine",
+      readable: readableOf(content), rawText: content || "",
     };
   }
 
@@ -157,6 +172,7 @@ export async function processSource(
       entities: r.entities, links: r.links, truncated: r.truncated,
       note: `Fetched ${title || opts.url} (${text.length} chars) → ${r.note}`,
       unresolved: r.unresolved, enrichment: r.enrichment, provider: r.provider,
+      readable: readableOf(text), rawText: text,
     };
   }
 
@@ -176,9 +192,49 @@ export interface StageCandidatesInput {
   actor: DBUser;
   note?: string;
   content?: string;
+  /** Clean reading-layout text; computed from content when omitted. */
+  readableContent?: string;
   unresolved?: string[];
   enrichment?: string;
   provider?: string;
+}
+
+/**
+ * AI PRE-READ — runs detached after staging: reads the full document and
+ * stores an exhaustive narrative brief on the batch BEFORE the Lead opens
+ * it, so SAHAYAK answers from ready context instead of cold text.
+ * Never throws, never blocks intake, skips short/structured payloads.
+ */
+function kickOffIntakeBrief(caseId: string, batchId: string, fileName: string | undefined, text: string): void {
+  try {
+    if (process.env.SAHAYAK_AUTOBRIEF === "false") return;
+    if (!text || text.length < 500) return;
+    const run = async () => {
+      try {
+        const { generateIntakeBrief } = await import("./sahayak");
+        const brief = await generateIntakeBrief(text.slice(0, 12000), fileName);
+        if (!brief) {
+          await db.ingestion_batches.updateOne(batchId, { briefPending: false }).catch(() => null);
+          return;
+        }
+        await db.ingestion_batches.updateOne(batchId, {
+          aiBrief: brief.brief,
+          briefProvider: brief.provider,
+          briefAt: new Date().toISOString(),
+          briefPending: false,
+        }).catch(() => null);
+        const { notifyCase } = await import("./diaryService");
+        notifyCase(caseId, "STAGING_UPDATED", "AI Brief Ready",
+          `SAHAYAK finished reading ${fileName || batchId} — brief ready for Lead review.`,
+          { name: "SAHAYAK", role: "SYSTEM" } as any);
+      } catch {
+        await db.ingestion_batches.updateOne(batchId, { briefPending: false }).catch(() => null);
+      }
+    };
+    void run().catch(() => undefined);
+  } catch {
+    /* intake must never fail because of the brief */
+  }
 }
 
 /**
@@ -194,6 +250,17 @@ export async function stageCandidates(input: StageCandidatesInput): Promise<{
   const now = new Date().toISOString();
   const batchId = `batch-${caseId}-${Date.now()}`;
   const content = (input.content || "").slice(0, MAX_BATCH_CONTENT_CHARS);
+  let readableContent = (input.readableContent || "").slice(0, MAX_BATCH_CONTENT_CHARS);
+  if (!readableContent && content) {
+    try {
+      const r = reconstructReadableText(content);
+      const joined = r.paragraphs.join("\n\n");
+      readableContent = (joined.length > 40 ? joined : content).slice(0, MAX_BATCH_CONTENT_CHARS);
+    } catch {
+      readableContent = content;
+    }
+  }
+  const briefWanted = !!content && content.length >= 500 && process.env.SAHAYAK_AUTOBRIEF !== "false";
 
   await db.ingestion_batches.insertOne({
     _id: batchId,
@@ -214,10 +281,16 @@ export async function stageCandidates(input: StageCandidatesInput): Promise<{
     hash: batchHash(caseId, input.source, input.entities.length + input.links.length, actor._id, now),
     content: content || undefined,
     contentTruncated: (input.content || "").length > MAX_BATCH_CONTENT_CHARS,
+    readableContent: readableContent || undefined,
+    briefPending: briefWanted,
     unresolved: (input.unresolved || []).slice(0, 50),
     enrichment: input.enrichment,
     provider: input.provider,
   } as any);
+
+  if (briefWanted) {
+    kickOffIntakeBrief(caseId, batchId, input.fileName || input.url, readableContent || content);
+  }
 
   const stagedEntities = await Promise.all(
     input.entities.map(async (e, i) => {

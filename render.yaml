@@ -1,0 +1,32 @@
+# TRINETRA OS — Render backend (API + WS). Pair with the Vercel frontend.
+# Set the secret values in the Render dashboard (never commit them).
+services:
+  - type: web
+    name: trinetra-api
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/server.cjs
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SKIP_STATIC
+        value: "true"
+      # NOTE: do NOT set PORT — Render injects it; server.ts listens on process.env.PORT.
+      - key: CCTNS_DEMO_MODE
+        value: "false"
+      - key: JWT_SECRET
+        sync: false
+      - key: MONGO_URL
+        sync: false
+      - key: MONGO_DB
+        value: crimintel
+      - key: FRONTEND_URL
+        sync: false
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b

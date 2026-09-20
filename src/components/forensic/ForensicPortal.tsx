@@ -22,12 +22,18 @@ import {
  * 2. Superior Reporting Officer detail
  * 3. Direct drag-and-drop file ingestion for forensic artifacts/reports
  */
-export const ForensicPortal: React.FC = () => {
+export const ForensicPortal: React.FC<{ initialCaseId?: string }> = ({ initialCaseId }) => {
   const { user, logout, authorizedCases } = useAuth();
 
+  // Open the case picked in My Workspace — fall back to the first authorized case.
   const [currentCaseId, setCurrentCaseId] = useState<string>(
-    authorizedCases[0]?.id || "case-garuda"
+    initialCaseId || authorizedCases[0]?.id || "case-garuda"
   );
+
+  useEffect(() => {
+    if (initialCaseId && initialCaseId !== currentCaseId) setCurrentCaseId(initialCaseId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialCaseId]);
   const [caseSummary, setCaseSummary] = useState<any>(null);
   const [reportingOfficer, setReportingOfficer] = useState<any>(null);
   const [uploads, setUploads] = useState<any[]>([]);

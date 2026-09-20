@@ -11,11 +11,45 @@ import {
 } from "../types";
 
 /**
+ * Deterministic helpers: graph math must return identical results for
+ * identical inputs. A string-seeded PRNG replaces Math.random so community
+ * detection order is stable across reloads.
+ */
+function hashSeed(str: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function seededShuffle<T>(arr: T[], rand: () => number): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/**
  * Computes Graph Centrality Metrics:
  * - Degree Centrality: Immediate connectedness
  * - Betweenness Centrality (Brandes' Algorithm): Control of information flow / Kingpins
  * - Closeness Centrality: Proximity to entire network
- * - PageRank: Recursive prestige & structural authority
+ * - PageRank: Recursive prestige & structural authority (converged, deterministic)
  */
 export function computeGraphAnalytics(
   nodes: CrimeNetworkNode[],
@@ -147,7 +181,7 @@ export function computeGraphAnalytics(
       S.push(v);
       const dv = d.get(v)!;
 
-      const neighbors = Array.from(adj.get(v) || []);
+      const neighbors = Array.from(adj.get(v) || []).sort();
       for (const w of neighbors) {
         if (d.get(w)! < 0) {
           Q.push(w);
@@ -218,18 +252,19 @@ export function computeGraphAnalytics(
     }
   });
 
-  // 4. PageRank Algorithm
+  // 4. PageRank Algorithm (converged: L1 delta < 1e-6, cap 100 iters, deterministic order)
   const pageRank = new Map<string, number>();
   const initialPR = nodeCount > 0 ? 1 / nodeCount : 0;
   nodeIds.forEach((id) => pageRank.set(id, initialPR));
   const damping = 0.85;
+  const sortedIds = [...nodeIds].sort();
 
-  for (let iter = 0; iter < 20; iter++) {
+  for (let iter = 0; iter < 100; iter++) {
     const nextPR = new Map<string, number>();
-    nodeIds.forEach((id) => nextPR.set(id, nodeCount > 0 ? (1 - damping) / nodeCount : 0));
+    sortedIds.forEach((id) => nextPR.set(id, nodeCount > 0 ? (1 - damping) / nodeCount : 0));
 
-    nodeIds.forEach((u) => {
-      const neighbors = Array.from(adj.get(u) || []);
+    sortedIds.forEach((u) => {
+      const neighbors = Array.from(adj.get(u) || []).sort();
       const outDeg = neighbors.length;
       if (outDeg > 0) {
         const share = (damping * pageRank.get(u)!) / outDeg;
@@ -238,13 +273,18 @@ export function computeGraphAnalytics(
         });
       } else {
         const share = nodeCount > 0 ? (damping * pageRank.get(u)!) / nodeCount : 0;
-        nodeIds.forEach((v) => {
+        sortedIds.forEach((v) => {
           nextPR.set(v, nextPR.get(v)! + share);
         });
       }
     });
 
-    nodeIds.forEach((id) => pageRank.set(id, nextPR.get(id)!));
+    let delta = 0;
+    sortedIds.forEach((id) => {
+      delta += Math.abs(nextPR.get(id)! - pageRank.get(id)!);
+      pageRank.set(id, nextPR.get(id)!);
+    });
+    if (delta < 1e-6) break;
   }
 
   // 5. Cut Vertices (Articulation Points) using Tarjan's DFS
@@ -315,10 +355,11 @@ export function computeGraphAnalytics(
 
   const communities: SyndicateCommunity[] = [];
   Array.from(communityGroups.entries()).forEach(([cId, members], index) => {
-    // Find leader with highest betweenness/PageRank in cluster
-    let topLeader = members[0];
+    // Find leader with highest betweenness/PageRank in cluster (id tie-break)
+    const orderedMembers = [...members].sort();
+    let topLeader = orderedMembers[0];
     let topScore = -1;
-    members.forEach((m) => {
+    orderedMembers.forEach((m) => {
       const score = (betweenness.get(m) || 0) * 2 + (pageRank.get(m) || 0);
       if (score > topScore) {
         topScore = score;
@@ -386,16 +427,19 @@ function detectCommunities(
   adj: Map<string, Set<string>>
 ): Map<string, number> {
   const labels = new Map<string, number>();
-  nodeIds.forEach((id, idx) => labels.set(id, idx));
+  const sorted = [...nodeIds].sort();
+  sorted.forEach((id, idx) => labels.set(id, idx));
 
+  // Deterministic propagation order: seeded shuffle (stable across reloads),
+  // deterministic tie-break (smallest label wins).
+  const rand = mulberry32(hashSeed(sorted.join("|")));
   const maxIter = 15;
   for (let iter = 0; iter < maxIter; iter++) {
     let changed = false;
-    // Shuffle nodes for randomized propagation
-    const shuffled = [...nodeIds].sort(() => Math.random() - 0.5);
+    const shuffled = seededShuffle(sorted, rand);
 
     for (const u of shuffled) {
-      const neighbors = Array.from(adj.get(u) || []);
+      const neighbors = Array.from(adj.get(u) || []).sort();
       if (neighbors.length === 0) continue;
 
       const labelCounts = new Map<number, number>();
@@ -407,7 +451,7 @@ function detectCommunities(
       let maxCount = -1;
       let bestLabel = labels.get(u)!;
       for (const [l, count] of labelCounts.entries()) {
-        if (count > maxCount) {
+        if (count > maxCount || (count === maxCount && l < bestLabel)) {
           maxCount = count;
           bestLabel = l;
         }
@@ -421,14 +465,24 @@ function detectCommunities(
     if (!changed) break;
   }
 
-  // Renumber labels to 0, 1, 2, ...
-  const uniqueLabels = Array.from(new Set(Array.from(labels.values())));
+  // Stable renumber: largest community -> 0, then by smallest member id.
+  // Prevents color/name flicker between identical runs.
+  const groups = new Map<number, string[]>();
+  sorted.forEach((id) => {
+    const l = labels.get(id)!;
+    if (!groups.has(l)) groups.set(l, []);
+    groups.get(l)!.push(id);
+  });
+  const ordered = Array.from(groups.entries()).sort((a, b) => {
+    if (b[1].length !== a[1].length) return b[1].length - a[1].length;
+    return a[1][0] < b[1][0] ? -1 : 1;
+  });
   const labelRemap = new Map<number, number>();
-  uniqueLabels.forEach((l, idx) => labelRemap.set(l, idx));
+  ordered.forEach(([l], idx) => labelRemap.set(l, idx));
 
   const finalMap = new Map<string, number>();
-  nodeIds.forEach((id) => {
-    finalMap.set(id, labelRemap.get(labels.get(id)!) || 0);
+  sorted.forEach((id) => {
+    finalMap.set(id, labelRemap.get(labels.get(id)!) ?? 0);
   });
 
   return finalMap;
@@ -489,7 +543,8 @@ export function findShortestPath(
     adj.get(t)!.push({ neighbor: s, link: l, weight: edgeCost });
   });
 
-  // Dijkstra / Priority BFS
+  // Dijkstra with binary min-heap (deterministic: neighbors sorted by id,
+  // heap breaks distance ties by node id so repeated runs agree).
   const distances = new Map<string, number>();
   const parent = new Map<string, { node: string; link: CrimeNetworkLink } | null>();
   const visited = new Set<string>();
@@ -497,26 +552,51 @@ export function findShortestPath(
   distances.set(sourceId, 0);
   parent.set(sourceId, null);
 
-  // Simple min-distance extraction
-  const unvisited = new Set<string>(adj.keys());
-
-  while (unvisited.size > 0) {
-    let u: string | null = null;
-    let minD = Infinity;
-
-    for (const node of unvisited) {
-      const d = distances.get(node) ?? Infinity;
-      if (d < minD) {
-        minD = d;
-        u = node;
+  const heap: Array<{ node: string; dist: number }> = [{ node: sourceId, dist: 0 }];
+  const heapLess = (a: { node: string; dist: number }, b: { node: string; dist: number }) =>
+    a.dist !== b.dist ? a.dist < b.dist : a.node < b.node;
+  const heapPush = (item: { node: string; dist: number }) => {
+    heap.push(item);
+    let i = heap.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (heapLess(heap[i], heap[p])) {
+        [heap[i], heap[p]] = [heap[p], heap[i]];
+        i = p;
+      } else break;
+    }
+  };
+  const heapPop = () => {
+    const top = heap[0];
+    const last = heap.pop()!;
+    if (heap.length > 0) {
+      heap[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = i * 2 + 1;
+        const r = l + 1;
+        let smallest = i;
+        if (l < heap.length && heapLess(heap[l], heap[smallest])) smallest = l;
+        if (r < heap.length && heapLess(heap[r], heap[smallest])) smallest = r;
+        if (smallest === i) break;
+        [heap[i], heap[smallest]] = [heap[smallest], heap[i]];
+        i = smallest;
       }
     }
+    return top;
+  };
 
-    if (!u || minD === Infinity || u === targetId) {
-      break;
-    }
+  // Deterministic adjacency order for reproducible relaxation.
+  adj.forEach((list, key) => {
+    list.sort((a, b) => (a.neighbor < b.neighbor ? -1 : a.neighbor > b.neighbor ? 1 : 0));
+    adj.set(key, list);
+  });
 
-    unvisited.delete(u);
+  while (heap.length > 0) {
+    const { node: u, dist: minD } = heapPop();
+    if (visited.has(u)) continue;
+    if (minD > (distances.get(u) ?? Infinity)) continue;
+    if (u === targetId) break;
     visited.add(u);
 
     const currentDist = distances.get(u)!;
@@ -526,6 +606,7 @@ export function findShortestPath(
         if (newDist < (distances.get(neighbor) ?? Infinity)) {
           distances.set(neighbor, newDist);
           parent.set(neighbor, { node: u, link });
+          heapPush({ node: neighbor, dist: newDist });
         }
       }
     }

@@ -1,4 +1,5 @@
 import { UserAccount, AccessRequest, CaseMember, RealtimeCaseUpdate } from "../types";
+import { apiUrl, caseWsUrl } from "./apiBase";
 
 const TOKEN_KEY = "crim_intel_token";
 
@@ -35,8 +36,12 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     headers["X-VPN-Session"] = vpnSession;
   }
 
-  const response = await fetch(endpoint, {
+  // Split-deploy: relative "/api/..." stays same-origin; with VITE_API_URL
+  // set (Vercel → Render) this prefixes the Render backend origin.
+  const url = endpoint.startsWith("/api/") ? apiUrl(endpoint) : endpoint;
+  const response = await fetch(url, {
     ...options,
+    credentials: "include",
     headers,
   });
 
@@ -62,6 +67,7 @@ export const authApi = {
       token: string;
       user: UserAccount;
       authorized_cases: any[];
+      mustChangePassword?: boolean;
     }>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ identifier, password, otp }),
@@ -70,6 +76,30 @@ export const authApi = {
       setStoredToken(res.token);
     }
     return res;
+  },
+
+  /** Blocked-screen poll — no password needed, identifier only. */
+  accountStatus: async (identifier: string) => {
+    return request<{
+      status: string;
+      blocked?: boolean;
+      unblocked?: boolean;
+      name?: string;
+      tempPassword?: string;
+      mustChangePassword?: boolean;
+      message?: string;
+    }>("/api/auth/account-status", {
+      method: "POST",
+      body: JSON.stringify({ identifier }),
+    });
+  },
+
+  /** First-login rotation after admin unblock (temp-password session). */
+  changePassword: async (newPassword: string) => {
+    return request<{ success: boolean; message: string }>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ newPassword }),
+    });
   },
 
   requestAccess: async (formData: {
@@ -132,10 +162,10 @@ export const adminApi = {
     return request<{ requests: any[] }>("/api/admin/case-access-requests");
   },
 
-  approveCaseAccessRequest: async (id: string, notes?: string) => {
+  approveCaseAccessRequest: async (id: string, notes?: string, orderRef?: string) => {
     return request<{ success: boolean; message: string; member: CaseMember }>(`/api/admin/case-access-requests/${id}/approve`, {
       method: "POST",
-      body: JSON.stringify({ notes }),
+      body: JSON.stringify({ notes, orderRef }),
     });
   },
 
@@ -165,9 +195,26 @@ export const adminApi = {
   },
 
   updateUserStatus: async (id: string, status: "ACTIVE" | "SUSPENDED" | "REJECTED") => {
-    return request<{ success: boolean; message: string }>(`/api/admin/users/${id}/status`, {
+    return request<{ success: boolean; message: string; tempPassword?: string; mustChangePassword?: boolean }>(`/api/admin/users/${id}/status`, {
       method: "PATCH",
       body: JSON.stringify({ status }),
+    });
+  },
+
+  // Direct officer onboarding (auto email/ID, admin-set password, no justification).
+  addOfficer: async (payload: {
+    full_name: string;
+    branch?: string;
+    division?: string;
+    designation?: string;
+    department?: string;
+    requested_role: string;
+    state?: string;
+    password: string;
+  }) => {
+    return request<{ success: boolean; user: any }>("/api/admin/users", {
+      method: "POST",
+      body: JSON.stringify(payload),
     });
   },
 
@@ -179,10 +226,10 @@ export const adminApi = {
     return request<{ members: CaseMember[] }>(`/api/admin/cases/${caseId}/members`);
   },
 
-  assignCaseMember: async (caseId: string, userId: string) => {
-    return request<{ success: boolean; member: CaseMember }>(`/api/admin/cases/${caseId}/members`, {
+  assignCaseMember: async (caseId: string, userId: string, orderRef?: string) => {
+    return request<{ success: boolean; member: CaseMember; crossPosted?: boolean }>(`/api/admin/cases/${caseId}/members`, {
       method: "POST",
-      body: JSON.stringify({ userId }),
+      body: JSON.stringify({ userId, orderRef }),
     });
   },
 
@@ -201,15 +248,23 @@ export const adminApi = {
     return request<{ requisitions: any[] }>("/api/admin/requisitions");
   },
 
+  decideRequisition: async (id: string, approve: boolean, notes?: string, assigneeId?: string) => {
+    return request<{ success: boolean; assigned?: string }>(`/api/admin/requisitions/${id}/${approve ? "approve" : "reject"}`, {
+      method: "POST",
+      body: JSON.stringify({ notes, assigneeId }),
+    });
+  },
+
   // Phase 6 Req27 — cross-tenure admin directory for handover targeting.
   getAdmins: async () => {
     return request<{ admins: any[] }>("/api/admin/admins");
   },
 
-  decideRequisition: async (id: string, approve: boolean, notes?: string) => {
-    return request<{ success: boolean }>(`/api/admin/requisitions/${id}/${approve ? "approve" : "reject"}`, {
-      method: "POST",
-      body: JSON.stringify({ notes }),
+  // Admin case deletion (cascade)
+  deleteCase: async (caseId: string, reason: string) => {
+    return request<{ success: boolean; message: string }>(`/api/admin/cases/${caseId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirm: true, reason }),
     });
   },
 };
@@ -340,6 +395,14 @@ export const caseApi = {
     return request<{ requisitions: any[] }>(`/api/cases/${caseId}/data-requests`);
   },
 
+  // Lead triage of raw exhibits (approve → extract + stage; reject → drop).
+  triageEvidence: async (caseId: string, evidenceId: string, decision: "APPROVE" | "REJECT", note?: string) => {
+    return request<{ success: boolean; status: string; batchId?: string }>(`/api/cases/${caseId}/evidence/${evidenceId}/triage`, {
+      method: "POST",
+      body: JSON.stringify({ decision, note }),
+    });
+  },
+
   fulfillDataRequest: async (caseId: string, reqId: string, notes?: string) => {
     return request<{ success: boolean }>(`/api/cases/${caseId}/data-requests/${reqId}/fulfill`, {
       method: "POST",
@@ -359,10 +422,18 @@ export const caseApi = {
     });
   },
 
-  decideRequisition: async (caseId: string, reqId: string, approve: boolean, notes?: string) => {
-    return request<{ success: boolean }>(`/api/cases/${caseId}/requisitions/${reqId}/${approve ? "approve" : "reject"}`, {
+  decideRequisition: async (caseId: string, reqId: string, approve: boolean, notes?: string, assigneeId?: string) => {
+    return request<{ success: boolean; assigned?: string }>(`/api/cases/${caseId}/requisitions/${reqId}/${approve ? "approve" : "reject"}`, {
       method: "POST",
-      body: JSON.stringify({ notes }),
+      body: JSON.stringify({ notes, assigneeId }),
+    });
+  },
+
+  // Lead removes same-tenure personnel from the case.
+  leadRemoveMember: async (caseId: string, userId: string) => {
+    return request<{ success: boolean }>(`/api/cases/${caseId}/members/lead-remove`, {
+      method: "POST",
+      body: JSON.stringify({ userId }),
     });
   },
 
@@ -652,6 +723,34 @@ export const stagingApi = {
   },
 };
 
+// State-to-state collaboration (admin → admin, leads attached).
+export const collabApi = {
+  outbox: async () => {
+    return request<{ requests: any[] }>("/api/collab/requests/outbox");
+  },
+  inbox: async () => {
+    return request<{ requests: any[] }>("/api/collab/requests/inbox");
+  },
+  request: async (payload: { caseId: string; toState: string; message?: string }) => {
+    return request<{ success: boolean; request: any }>("/api/collab/requests", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+  approve: async (id: string, leadId: string, notes?: string) => {
+    return request<{ success: boolean; attachedLead: string; exhibitsShared: number }>(`/api/collab/requests/${id}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ leadId, notes }),
+    });
+  },
+  reject: async (id: string, notes?: string) => {
+    return request<{ success: boolean }>(`/api/collab/requests/${id}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ notes }),
+    });
+  },
+};
+
 // Phase 6 Req27/28 — handover + migration router.
 export const migrationApi = {
   handover: async (payload: {
@@ -687,6 +786,22 @@ export const migrationApi = {
 export const sahayakApi = {
   health: async () => {
     return request<{ providers: any[]; loraEndpoint: any; mesh?: { transport: string; tailscaleHostname: string | null; peers: any[]; knownAdapters: string[] } }>("/api/sahayak/health");
+  },
+
+  // SAHAYAK model extraction (Groq-backed, no silent fallbacks).
+  extract: async (text: string, fileName?: string) => {
+    return request<{
+      nodes: any[];
+      links: any[];
+      summary: string;
+      suspiciousSignals: string[];
+      engine: string;
+      provider: string;
+      model: string;
+    }>("/api/extract-entities/sahayak", {
+      method: "POST",
+      body: JSON.stringify({ text, fileName }),
+    });
   },
 
   ask: async (question: string, caseId?: string, adhocContext?: string) => {
@@ -730,7 +845,7 @@ export const sahayakApi = {
   },
 
   summarize: async (text: string, targetLang?: string, adapter?: string) => {
-    return request<{ summary: string; provider: string; llmUsed: boolean; lines?: string[] }>(
+    return request<{ summary: string; provider: string; llmUsed: boolean; lines?: string[]; language?: string }>(
       "/api/sahayak/summarize",
       { method: "POST", body: JSON.stringify({ text, targetLang, adapter }) }
     );
@@ -800,9 +915,9 @@ export function createCaseWebSocket(
   onUpdate: (event: RealtimeCaseUpdate) => void,
   activeCaseId?: string
 ): () => void {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const token = getStoredToken() || "";
-  const wsUrl = `${protocol}//${window.location.host}/ws/case-updates?token=${encodeURIComponent(token)}`;
+  // Same-origin by default; VITE_WS_URL or VITE_API_URL (Render) when split.
+  const wsUrl = caseWsUrl(token);
 
   let ws: WebSocket | null = null;
   let isClosed = false;

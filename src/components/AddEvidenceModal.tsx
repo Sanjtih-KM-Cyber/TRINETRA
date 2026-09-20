@@ -25,15 +25,15 @@ import {
   CDRRecord,
   FinancialRecord,
   EvidenceFileRecord,
-  AIProcessingEngine,
 } from "../types";
 import {
-  extractEntitiesUniversal,
   parseCDRCSV,
   parseFinancialCSV,
   formatBytes,
   generateFileHash,
 } from "../services/nlpExtractor";
+import { sahayakApi } from "../services/api";
+import { apiUrl } from "../services/apiBase";
 
 interface AddEvidenceModalProps {
   isOpen: boolean;
@@ -71,10 +71,11 @@ export const AddEvidenceModal: React.FC<AddEvidenceModalProps> = ({
   onCommitEvidence,
 }) => {
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
-  const [engine, setEngine] = useState<AIProcessingEngine>("LOCAL_OFFLINE");
   const [isProcessing, setIsProcessing] = useState(false);
   const [processProgress, setProcessProgress] = useState(0);
   const [activeStep, setActiveStep] = useState<"upload" | "preview">("upload");
+  const [engineBadge, setEngineBadge] = useState<string | null>(null);
+  const [extractErrors, setExtractErrors] = useState<string[]>([]);
 
   // Accumulated extraction results
   const [extractedNodes, setExtractedNodes] = useState<CrimeNetworkNode[]>([]);
@@ -140,6 +141,8 @@ export const AddEvidenceModal: React.FC<AddEvidenceModalProps> = ({
     if (stagedFiles.length === 0 || isOverLimit) return;
     setIsProcessing(true);
     setProcessProgress(5);
+    setExtractErrors([]);
+    setEngineBadge(null);
 
     const allNewNodes: CrimeNetworkNode[] = [];
     const allNewLinks: CrimeNetworkLink[] = [];
@@ -172,7 +175,7 @@ export const AddEvidenceModal: React.FC<AddEvidenceModalProps> = ({
           const chunkBuffer = await chunkBlob.arrayBuffer();
 
           // Stream chunk to backend
-          const res = await fetch("/api/upload-chunk", {
+          const res = await fetch(apiUrl("/api/upload-chunk"), {
             method: "POST",
             headers: {
               "Content-Type": "application/octet-stream",
@@ -229,10 +232,22 @@ Forensic Seizure: Processed under Case ${caseTitle}. Handset IMEI / Call details
         allNewFins.push(...parsedFins);
       }
 
-      // Universal Entity Extraction
-      const extractResult = await extractEntitiesUniversal(textContent, item.name, engine);
-      allNewNodes.push(...extractResult.nodes);
-      allNewLinks.push(...extractResult.links);
+      // SAHAYAK model extraction (Groq-backed; honest failures, no mock entities)
+      let nodeCount = 0;
+      let linkCount = 0;
+      let fileSummary = "";
+      try {
+        const extractResult = await sahayakApi.extract(textContent, item.name);
+        setEngineBadge(`SAHAYAK · ${extractResult.provider}/${extractResult.model}`);
+        allNewNodes.push(...extractResult.nodes);
+        allNewLinks.push(...extractResult.links);
+        nodeCount = extractResult.nodes.length;
+        linkCount = extractResult.links.length;
+        fileSummary = extractResult.summary;
+      } catch (err: any) {
+        setExtractErrors((prev) => [...prev, `${item.name}: ${err.message || "SAHAYAK extraction failed"}`]);
+        continue;
+      }
 
       newEvidenceRecords.push({
         id: `EVID-${Date.now()}-${i + 1}`,
@@ -243,9 +258,9 @@ Forensic Seizure: Processed under Case ${caseTitle}. Handset IMEI / Call details
         fileHash,
         uploadedAt: new Date().toISOString().replace("T", " ").slice(0, 19),
         processingStatus: "PROCESSED",
-        extractedEntitiesCount: extractResult.nodes.length,
-        extractedRelationsCount: extractResult.links.length,
-        summary: extractResult.summary,
+        extractedEntitiesCount: nodeCount,
+        extractedRelationsCount: linkCount,
+        summary: fileSummary,
         rawTextPreview: textContent.slice(0, 500),
       });
     }
@@ -307,79 +322,38 @@ Forensic Seizure: Processed under Case ${caseTitle}. Handset IMEI / Call details
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
           {activeStep === "upload" ? (
             <>
-              {/* Step 1: AI Processing Engine Selector */}
+              {/* Step 1: SAHAYAK model extraction pipeline */}
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-bold text-slate-300 uppercase tracking-wider font-mono flex items-center gap-2">
                     <Cpu className="w-4 h-4 text-amber-400" />
-                    <span>1. Select AI Processing Pipeline</span>
+                    <span>1. Extract with SAHAYAK</span>
                   </label>
                   <span className="text-[10px] font-mono text-slate-400">
-                    Offline-First & Cloud Ready
+                    {engineBadge || "live model extraction"}
                   </span>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  {/* Option 1: Local AI */}
-                  <div
-                    onClick={() => setEngine("LOCAL_OFFLINE")}
-                    className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
-                      engine === "LOCAL_OFFLINE"
-                        ? "bg-amber-500/10 border-amber-500/60 ring-1 ring-amber-500/30"
-                        : "bg-slate-950/60 border-slate-800 hover:border-slate-700"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className={`text-xs font-bold ${engine === "LOCAL_OFFLINE" ? "text-amber-300" : "text-slate-200"}`}>
-                        Local AI / Air-Gapped
-                      </span>
-                      {engine === "LOCAL_OFFLINE" && <CheckCircle2 className="w-4 h-4 text-amber-400" />}
-                    </div>
-                    <p className="text-[11px] text-slate-400 leading-relaxed">
-                      100% Offline regex & deterministic NER. Zero external API calls, ideal for air-gapped LEA nodes.
-                    </p>
+                <div className="p-3.5 rounded-xl border bg-amber-500/10 border-amber-500/60 ring-1 ring-amber-500/30">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold text-amber-300">
+                      SAHAYAK Model Pipeline
+                    </span>
+                    <CheckCircle2 className="w-4 h-4 text-amber-400" />
                   </div>
-
-                  {/* Option 2: Groq LPU */}
-                  <div
-                    onClick={() => setEngine("GROQ_LPU")}
-                    className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
-                      engine === "GROQ_LPU"
-                        ? "bg-cyan-500/10 border-cyan-500/60 ring-1 ring-cyan-500/30"
-                        : "bg-slate-950/60 border-slate-800 hover:border-slate-700"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className={`text-xs font-bold ${engine === "GROQ_LPU" ? "text-cyan-300" : "text-slate-200"}`}>
-                        Groq LPU Accelerator
-                      </span>
-                      {engine === "GROQ_LPU" && <CheckCircle2 className="w-4 h-4 text-cyan-400" />}
-                    </div>
-                    <p className="text-[11px] text-slate-400 leading-relaxed">
-                      Ultra high-speed inference for processing hundreds of pages per second with sub-second latency.
-                    </p>
-                  </div>
-
-                  {/* Option 3: Gemini 3.7 */}
-                  <div
-                    onClick={() => setEngine("GEMINI_37")}
-                    className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
-                      engine === "GEMINI_37"
-                        ? "bg-indigo-500/10 border-indigo-500/60 ring-1 ring-indigo-500/30"
-                        : "bg-slate-950/60 border-slate-800 hover:border-slate-700"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className={`text-xs font-bold ${engine === "GEMINI_37" ? "text-indigo-300" : "text-slate-200"}`}>
-                        Google Gemini 3.7 Flash
-                      </span>
-                      {engine === "GEMINI_37" && <CheckCircle2 className="w-4 h-4 text-indigo-400" />}
-                    </div>
-                    <p className="text-[11px] text-slate-400 leading-relaxed">
-                      Deep multimodal reasoning, cross-document entity synthesis, and Hawala layering resolution.
-                    </p>
-                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Every narrative is extracted by the live SAHAYAK model. Tabular CDR/financial dumps use deterministic parsers. Failures are reported honestly — nothing is fabricated.
+                  </p>
                 </div>
+                {extractErrors.length > 0 && (
+                  <div className="space-y-1.5">
+                    {extractErrors.map((e, i) => (
+                      <div key={i} className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-300">
+                        {e}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Step 2: 15GB Drag & Drop Upload Zone */}

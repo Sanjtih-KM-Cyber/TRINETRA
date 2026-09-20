@@ -62,6 +62,140 @@ export interface Reconstruction {
   note: string;
 }
 
+/**
+ * READABLE RECONSTRUCTION — turns raw PDF text dumps into a clean,
+ * human-readable document for the Lead's source reader. Fixes the three
+ * classic pdfjs artefacts:
+ *  1. letter-spaced headings ("S U P R E M E ..." → "SUPREME ..."),
+ *  2. glued tokens ("2024These", "incidentOF" → spaced),
+ *  3. repeated running headers/footers, signature blocks and page numbers.
+ * Then rebuilds wrapped lines into real paragraphs and pages. Pure and
+ * deterministic. The raw text is always retained separately for custody.
+ */
+const KNOWN_SPACED_PHRASES: Array<[RegExp, string]> = [
+  [/^SUPREMECOURTOFINDIA$/, "SUPREME COURT OF INDIA"],
+  [/^RECORDOFPROCEEDINGS$/, "RECORD OF PROCEEDINGS"],
+  [/^SUOMOTOWRIT$/, "SUO MOTU WRIT"],
+  [/^ORDER$/, "ORDER"],
+  [/^CORAM$/, "CORAM"],
+  [/^UPONHEARING.*$/, "UPON HEARING THE COUNSEL THE COURT MADE THE FOLLOWING"],
+];
+
+const JUNK_LINE_PATTERNS: RegExp[] = [
+  /^\d{1,4}$/, // bare page numbers
+  /indiankanoon\.org\/doc\//i, // scraper footer (case title + page no. live here)
+  /^signature not verified/i,
+  /^digitally signed by/i,
+  /^date:\s*\d{4}\.\d{2}\.\d{2}/i,
+  /^reason:/i,
+  /^\(.*A\.R\.-cum-P\.S\..*\)$/i,
+  /^assistant registrar$/i,
+];
+
+function collapseSpacedLetters(line: string): string {
+  // Collapse whole runs of 4+ single spaced capitals in one match:
+  // "S U P R E M E" → "SUPREME". Matching the run atomically means a
+  // standalone word like the "A" in "OF A TRAINEE" is never glued.
+  const out = line.replace(/(?:(?<![^\s])[A-Z]\s+){4,}[A-Z](?=\s|$)/g, (m) =>
+    m.replace(/\s+/g, "")
+  );
+  // Restore word breaks in known legal headings.
+  for (const [re, fix] of KNOWN_SPACED_PHRASES) {
+    if (re.test(out.trim())) return fix;
+  }
+  return out;
+}
+
+function tidyLine(line: string): string {
+  let s = line;
+  s = collapseSpacedLetters(s);
+  // Glue artefacts from justified PDF columns.
+  s = s.replace(/([a-z])([A-Z])/g, "$1 $2"); // incidentOF → incident OF
+  s = s.replace(/(\d)([A-Z][a-z])/g, "$1 $2"); // 2024These → 2024 These
+  s = s.replace(/([a-zA-Z])(\()/g, "$1 $2");
+  s = s.replace(/(\))([a-zA-Z])/g, "$1 $2");
+  s = s.replace(/[ \t]{2,}/g, " ").trim();
+  // De-hyphenate wrapped words: "communi-\ncation" handled at join stage;
+  // here fix inline "word- word" splits conservatively (common prefixes).
+  return s;
+}
+
+function isHeading(line: string): boolean {
+  if (line.length > 90) return false;
+  const letters = line.replace(/[^A-Za-z]/g, "");
+  if (letters.length < 4) return false;
+  const upper = letters.replace(/[^A-Z]/g, "").length;
+  return upper / letters.length > 0.85;
+}
+
+export function reconstructReadableText(raw: string, pageChars = 2800): { paragraphs: string[]; pages: string[] } {
+  if (!raw) return { paragraphs: [], pages: [] };
+  const rawLines = String(raw).replace(/\r/g, "").split("\n");
+
+  // Pass 1 — tidy + drop junk, with a 1-line lookahead for signature names.
+  const kept: string[] = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    const t = tidyLine(rawLines[i]);
+    if (!t) continue;
+    if (JUNK_LINE_PATTERNS.some((re) => re.test(t))) continue;
+    const next = (rawLines[i + 1] || "").trim();
+    if (/^[A-Z][a-z]+(\s+[A-Z][a-z.]+){0,2}$/.test(t) && /^date:\s*\d{4}\./i.test(next)) continue; // signatory name
+    kept.push(t);
+  }
+
+  // Pass 2 — drop repeated running headers/footers (keep first sighting).
+  const freq = new Map<string, number>();
+  for (const l of kept) {
+    const k = l.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+    if (k.length > 30) freq.set(k, (freq.get(k) || 0) + 1);
+  }
+  const seen = new Set<string>();
+  const deduped = kept.filter((l) => {
+    const k = l.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+    if (k.length > 30 && (freq.get(k) || 0) >= 3) {
+      if (seen.has(k)) return false;
+      seen.add(k);
+    }
+    return true;
+  });
+
+  // Pass 3 — rebuild paragraphs from wrapped lines.
+  const paragraphs: string[] = [];
+  let cur = "";
+  const flush = () => {
+    const p = cur.trim();
+    if (p.length >= 2) paragraphs.push(p);
+    cur = "";
+  };
+  for (const line of deduped) {
+    if (/^\d{1,3}[\s.)]/.test(line) && line.length > 10) { flush(); cur = line; continue; } // numbered order paras
+    if (isHeading(line)) { flush(); paragraphs.push(line); continue; }
+    if (!cur) { cur = line; continue; }
+    // Join hyphenated wrap: "communi- cation" → "communication".
+    if (/-$/.test(cur)) {
+      cur = cur.slice(0, -1) + line.replace(/^\s+/, "");
+    } else {
+      cur += " " + line;
+    }
+    // Cap runaway paragraphs at sentence boundaries.
+    if (cur.length > 1200 && /[.:;]["']?$/.test(line)) flush();
+  }
+  flush();
+
+  // Pass 4 — paginate on paragraph boundaries.
+  const pages: string[] = [];
+  let page = "";
+  for (const p of paragraphs) {
+    if (page && page.length + p.length + 2 > pageChars) {
+      pages.push(page);
+      page = "";
+    }
+    page += (page ? "\n\n" : "") + p;
+  }
+  if (page) pages.push(page);
+  return { paragraphs, pages };
+}
+
 export const MAX_RECON_ENTITIES = 200;
 export const MAX_RECON_LINKS = 400;
 

@@ -56,8 +56,8 @@ router.post("/:caseId/query", requireCaseMembership, requireCopilotAccess, async
   let confidenceScore = 0.92;
   let recommendedActions: string[] = [];
 
-  const provider = getActiveProvider();
-  
+  let provider: string = getActiveProvider();
+
   try {
     const systemPrompt = `You are the TRINETRA National Security AI Copilot advising Law Enforcement and Investigative Officers on the case.
 Answer the investigator's question thoroughly, tactically, and accurately based on the case intelligence and forensic principles.
@@ -84,6 +84,7 @@ Respond in JSON format with:
 
     const parsed = JSON.parse(response.content);
     answer = parsed.answer || "Query successfully analyzed against case intelligence files.";
+    if (response.provider) provider = response.model ? `${response.provider}/${response.model}` : response.provider;
     citations = parsed.citations || ["EVID-001 (FIR 209)", "EVID-002 (Dongri CDR Dump)"];
     confidenceScore = parsed.confidenceScore || 0.95;
     recommendedActions = parsed.recommendedActions || [
@@ -160,7 +161,7 @@ router.post(["/", "/query"], async (req: AuthenticatedRequest, res: Response) =>
     db.relationships.find({ case_id: effectiveCaseId }),
   ]);
 
-  const provider = getActiveProvider();
+  let provider: string = getActiveProvider();
   let answer = "";
   let citations: string[] = [];
   let confidenceScore = 0.95;
@@ -188,6 +189,7 @@ Provide a concise tactical assessment in JSON format:
 
     const parsed = JSON.parse(response.content);
     answer = parsed.answer;
+    if (response.provider) provider = response.model ? `${response.provider}/${response.model}` : response.provider;
     citations = parsed.citations || ["EVID-001 (FIR 209)", "Graph Topology Analysis"];
     confidenceScore = parsed.confidenceScore || 0.95;
     recommendedActions = parsed.recommendedActions || ["Subpoena telecom provider logs", "Review financial audit records"];

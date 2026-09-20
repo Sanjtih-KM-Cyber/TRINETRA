@@ -1,4 +1,6 @@
 import bcrypt from "bcryptjs";
+import fs from "fs";
+import path from "path";
 import {
   CASE_DATASETS,
   GARUDA_SYNDICATE_NODES,
@@ -13,6 +15,7 @@ import {
 } from "../src/data/mockDatasets";
 
 import type { UserRole } from "../src/data/roles";
+import { withVaultCryptoBackend } from "./services/vaultCrypto";
 export type DBRole = UserRole;
 
 export interface DBUser {
@@ -33,6 +36,13 @@ export interface DBUser {
   approved_at?: string;
   last_login?: string;
   avatarColor?: string;
+  /** Forced rotation after admin unblock: login succeeds but client must
+   * route to the change-password screen before the workstation. */
+  mustChangePassword?: boolean;
+  /** Plain one-time password issued at unblock. Returned ONLY via the
+   * account-status poll for the matching identifier until rotation.
+   * Cleared on password change. */
+  pendingTempPassword?: string;
 }
 
 export interface DBAccessRequest {
@@ -148,7 +158,7 @@ export interface DBEvidence {
   uploaded_at: string;
   uploaded_by: string; // user_id or name
   uploader_role: string;
-  status: "UPLOADED" | "PROCESSING" | "VALIDATED" | "COMMITTED";
+  status: "UPLOADED" | "PROCESSING" | "VALIDATED" | "COMMITTED" | "REJECTED";
   source_authority: string;
   summary: string;
   raw_text?: string;
@@ -429,6 +439,25 @@ export interface DBRequisition {
   fulfilled_at?: string;
 }
 
+/** State-to-state collaboration request (one state's admin → another's). */
+export interface DBCollabRequest {
+  _id: string;
+  case_id: string;
+  case_code: string;
+  from_state: string;
+  to_state: string;
+  requested_by: string;
+  requested_by_role: string;
+  message: string;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  requested_at: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  review_notes?: string;
+  attached_lead_id?: string;
+  attached_lead_name?: string;
+}
+
 /** Judicial dossier signature (Sec 65B IEA / Sec 63 BSA attestation). */
 export interface DBDossierSignature {
   _id: string;
@@ -481,6 +510,8 @@ class InMemoryDatabase {
   innocent_pool: Map<string, DBInnocentItem> = new Map();
   // ---- Phase 3: Personnel requisitions (Lead → Admin) ----
   requisitions: Map<string, DBRequisition> = new Map();
+  // ---- State-to-state collaboration requests (admin → admin) ----
+  collab_requests: Map<string, DBCollabRequest> = new Map();
   // ---- Judicial dossier signatures (Sec 65B IEA / Sec 63 BSA) ----
   dossier_signatures: Map<string, DBDossierSignature> = new Map();
   transfers: Map<string, DBTransfer> = new Map();
@@ -507,6 +538,13 @@ export interface DBIngestionBatch {
   /** Raw source retained (capped) for as-is review + SAHAYAK summary. */
   content?: string;
   contentTruncated?: boolean;
+  /** Clean reading-layout text (de-hyphenated, headers stripped, paragraphed). */
+  readableContent?: string;
+  /** AI pre-read: exhaustive narrative brief generated at ingest, before Lead review. */
+  aiBrief?: string;
+  briefProvider?: string;
+  briefAt?: string;
+  briefPending?: boolean;
   /** Lines/rows that yielded nothing — reviewable, never dropped. */
   unresolved?: string[];
   enrichment?: string;
@@ -726,23 +764,27 @@ async function seedInitialData() {
     mkUser("user-nia-field", "PSO Vishal Shetty", "NIA-FLD-302", "field@nia.gov.in", agencyPass,
       "National Investigation Agency (NIA)", "Tactical Ground Unit", "Undercover Operations", "NIA_FIELD", undefined, "#475569"),
 
-    // ---- CID ----
-    mkUser("user-cid-admin", "ADGP Suresh Nadgouda, IPS", "CID-ADM-001", "admin@cid.gov.in", adminPass,
-      "Crime Investigation Department (CID)", "Additional DGP / Admin", "State CID Governance", "CID_ADMIN", undefined, "#1d4ed8"),
-    mkUser("user-cid-lead", "SP Rohit Inamdar, IPS", "CID-LEAD-310", "inamdar@cid.gov.in", leadPass,
-      "Crime Investigation Department (CID)", "Superintendent of Police (Lead IO)", "Multi-District Investigations", "CID_LEAD", undefined, "#1d4ed8"),
-    mkUser("user-cid-cyber", "Insp. Tanvi Joshi", "CID-CYBER-003", "cid_cyber_01@cid.gov.in", agencyPass,
-      "Crime Investigation Department (CID)", "Cyber Cell Expert", "State Cyber Crime Cell", "CID_CYBER", undefined, "#0e7490"),
-    mkUser("user-cid-forensic", "Forensic Tech. Prakash Mane", "CID-FSL-103", "fsl@cid.gov.in", forensicPass,
-      "Crime Investigation Department (CID)", "State FSL / Fingerprint Bureau", "Fingerprint & Toxicology Unit", "CID_FORENSIC", undefined, "#059669"),
-    mkUser("user-cid-field", "SI Sunil Pawar", "CID-FLD-303", "field@cid.gov.in", agencyPass,
-      "Crime Investigation Department (CID)", "Sub-Inspector", "District Field Operations", "CID_FIELD", undefined, "#475569"),
+    // ---- CID (statewise, like State Police; seeds below are Maharashtra CID) ----
+    mkUser("user-cid-admin", "ADGP Suresh Nadgouda, IPS", "CID-MHA-ADM-001", "admin@cid.gov.in", adminPass,
+      "Crime Investigation Department (CID)", "Additional DGP / Admin", "State CID Governance", "CID_ADMIN", "MAHARASHTRA", "#1d4ed8"),
+    mkUser("user-cid-lead", "SP Rohit Inamdar, IPS", "CID-MHA-LEAD-310", "inamdar@cid.gov.in", leadPass,
+      "Crime Investigation Department (CID)", "Superintendent of Police (Lead IO)", "Multi-District Investigations", "CID_LEAD", "MAHARASHTRA", "#1d4ed8"),
+    mkUser("user-cid-cyber", "Insp. Tanvi Joshi", "CID-MHA-CYBER-003", "cid_cyber_01@cid.gov.in", agencyPass,
+      "Crime Investigation Department (CID)", "Cyber Cell Expert", "State Cyber Crime Cell", "CID_CYBER", "MAHARASHTRA", "#0e7490"),
+    mkUser("user-cid-forensic", "Forensic Tech. Prakash Mane", "CID-MHA-FSL-103", "fsl@cid.gov.in", forensicPass,
+      "Crime Investigation Department (CID)", "State FSL / Fingerprint Bureau", "Fingerprint & Toxicology Unit", "CID_FORENSIC", "MAHARASHTRA", "#059669"),
+    mkUser("user-cid-field", "SI Sunil Pawar", "CID-MHA-FLD-303", "field@cid.gov.in", agencyPass,
+      "Crime Investigation Department (CID)", "Sub-Inspector", "District Field Operations", "CID_FIELD", "MAHARASHTRA", "#475569"),
 
     // ---- State Police: Maharashtra ----
     mkUser("user-mh-admin", "DGP Vinayak Chavan, IPS", "MHA-ADM-001", "admin@mahapolice.gov.in", adminPass,
       "Maharashtra Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "MAHARASHTRA", "#1e293b"),
     mkUser("user-mh-lead", "PI Devendra Patil", "MHA-LEAD-502", "patil@mahapolice.gov.in", leadPass,
       "Maharashtra Police", "Police Inspector (Station House)", "Anti-Narcotics & Surveillance Squad", "POLICE_LEAD", "MAHARASHTRA", "#f59e0b"),
+    mkUser("user-mh-cyber", "API Sneha Kulkarni", "MHA-CYB-601", "cyber@mahapolice.gov.in", agencyPass,
+      "Maharashtra Police", "Assistant PI (Cyber Cell)", "District Cyber & OSINT Unit", "POLICE_CYBER", "MAHARASHTRA", "#0e7490"),
+    mkUser("user-mh-forensic", "Dr. Milind Pawar", "MHA-FSL-602", "fsl@mahapolice.gov.in", forensicPass,
+      "Maharashtra Police", "Forensic Medical Officer", "District Forensic Unit", "POLICE_FORENSIC", "MAHARASHTRA", "#059669"),
     mkUser("user-mh-field", "PC Ramesh Gite", "MHA-FLD-701", "gite@mahapolice.gov.in", investigatorPass,
       "Maharashtra Police", "Police Constable", "Beat / Field Collection", "POLICE_FIELD", "MAHARASHTRA", "#475569"),
 
@@ -751,12 +793,42 @@ async function seedInitialData() {
       "Karnataka Police", "Inspector General / Admin", "State Police Governance", "POLICE_ADMIN", "KARNATAKA", "#1e293b"),
     mkUser("user-ka-lead", "PI Srinivas Rao", "KAR-LEAD-503", "rao@karpolice.gov.in", leadPass,
       "Karnataka Police", "Police Inspector (Station House)", "Crime Branch", "POLICE_LEAD", "KARNATAKA", "#f59e0b"),
+    mkUser("user-ka-cyber", "PSI Divya Nair", "KAR-CYB-601", "cyber@karpolice.gov.in", agencyPass,
+      "Karnataka Police", "Sub-Inspector (Cyber Cell)", "District Cyber & OSINT Unit", "POLICE_CYBER", "KARNATAKA", "#0e7490"),
+    mkUser("user-ka-forensic", "Dr. Arvind Menon", "KAR-FSL-602", "fsl@karpolice.gov.in", forensicPass,
+      "Karnataka Police", "Forensic Medical Officer", "District Forensic Unit", "POLICE_FORENSIC", "KARNATAKA", "#059669"),
     mkUser("user-ka-field", "PC Manjunath B.", "KAR-FLD-702", "manjunath@karpolice.gov.in", investigatorPass,
       "Karnataka Police", "Police Constable", "Beat / Field Collection", "POLICE_FIELD", "KARNATAKA", "#475569"),
 
+    // ---- Additional state tenants (admin seeded; staff onboarded via Add Officer) ----
+    mkUser("user-tn-admin", "DGP K. Selvam, IPS", "TN-ADM-001", "admin@tnpolice.gov.in", adminPass,
+      "Tamil Nadu Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "TAMIL_NADU", "#1e293b"),
+    mkUser("user-kl-admin", "DGP Anitha Nair, IPS", "KL-ADM-001", "admin@keralapolice.gov.in", adminPass,
+      "Kerala Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "KERALA", "#1e293b"),
+    mkUser("user-ap-admin", "DGP R. Prasad, IPS", "AP-ADM-001", "admin@appolice.gov.in", adminPass,
+      "Andhra Pradesh Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "ANDHRA_PRADESH", "#1e293b"),
+    mkUser("user-ts-admin", "DGP S. Reddy, IPS", "TS-ADM-001", "admin@tspolice.gov.in", adminPass,
+      "Telangana Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "TELANGANA", "#1e293b"),
+    mkUser("user-gj-admin", "DGP H. Patel, IPS", "GJ-ADM-001", "admin@gujaratpolice.gov.in", adminPass,
+      "Gujarat Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "GUJARAT", "#1e293b"),
+    mkUser("user-rj-admin", "DGP V. Singh, IPS", "RJ-ADM-001", "admin@rajpolice.gov.in", adminPass,
+      "Rajasthan Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "RAJASTHAN", "#1e293b"),
+    mkUser("user-up-admin", "DGP A. Yadav, IPS", "UP-ADM-001", "admin@uppolice.gov.in", adminPass,
+      "Uttar Pradesh Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "UTTAR_PRADESH", "#1e293b"),
+    mkUser("user-mp-admin", "DGP N. Sharma, IPS", "MP-ADM-001", "admin@mppolice.gov.in", adminPass,
+      "Madhya Pradesh Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "MADHYA_PRADESH", "#1e293b"),
+    mkUser("user-wb-admin", "DGP S. Banerjee, IPS", "WB-ADM-001", "admin@wbpolice.gov.in", adminPass,
+      "West Bengal Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "WEST_BENGAL", "#1e293b"),
+    mkUser("user-pb-admin", "DGP G. Gill, IPS", "PB-ADM-001", "admin@punjabpolice.gov.in", adminPass,
+      "Punjab Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "PUNJAB", "#1e293b"),
+    mkUser("user-dl-admin", "CP R. Verma, IPS", "DL-ADM-001", "admin@delhipolice.gov.in", adminPass,
+      "Delhi Police", "Commissioner / Admin", "State Police Governance", "POLICE_ADMIN", "DELHI", "#1e293b"),
+    mkUser("user-br-admin", "DGP P. Kumar, IPS", "BR-ADM-001", "admin@biharpolice.gov.in", adminPass,
+      "Bihar Police", "Director General / Admin", "State Police Governance", "POLICE_ADMIN", "BIHAR", "#1e293b"),
+
     // Pending approval demo
-    mkUser("user-pending-01", "Inspector Pooja Sharma", "CID-CRIME-992", "sharma@cid.gov.in", pendingPass,
-      "Crime Investigation Department (CID)", "Cyber Forensics Examiner", "Digital Evidence Analysis Unit", "CID_CYBER", undefined, "#ec4899", "PENDING"),
+    mkUser("user-pending-01", "Inspector Pooja Sharma", "CID-MHA-CRIME-992", "sharma@cid.gov.in", pendingPass,
+      "Crime Investigation Department (CID)", "Cyber Forensics Examiner", "Digital Evidence Analysis Unit", "CID_CYBER", "MAHARASHTRA", "#ec4899", "PENDING"),
   ];
 
   for (const u of demoUsers) {
@@ -801,7 +873,7 @@ async function seedInitialData() {
   const CASE_TENURES: Record<string, { org: string; state?: string }> = {
     "case-garuda": { org: "POLICE", state: "MAHARASHTRA" },
     "case-shadowvault": { org: "CBI" },
-    "case-interstate": { org: "CID" },
+    "case-interstate": { org: "CID", state: "MAHARASHTRA" },
   };
   for (const c of CASE_DATASETS) {
     const tenure = CASE_TENURES[c.id] || { org: "UNKNOWN" as string };
@@ -817,6 +889,36 @@ async function seedInitialData() {
       state: (tenure as any).state,
       created_at: "2026-08-14T09:00:00.000Z",
     });
+  }
+
+  // Departmental home cases so every Admin/Lead tenure opens with content.
+  const homeCases = [
+    {
+      _id: "case-blacktide",
+      id: "case-blacktide",
+      name: "Operation BlackTide: Transnational Terror Financing Network",
+      codeName: "OP-BLACKTIDE-2026",
+      description: "UAPA investigation into cross-border hawala conduits funding proscribed outfits across three states. Terror-financing trails, encrypted channel intercepts and interstate raid coordination.",
+      date: "2026-08-18",
+      leadAgency: "National Investigation Agency (NIA)",
+      org: "NIA",
+      created_at: "2026-08-18T09:00:00.000Z",
+    },
+    {
+      _id: "case-kaveri",
+      id: "case-kaveri",
+      name: "Operation Kaveri: Interstate Absconder & Financial Fraud Ring",
+      codeName: "OP-KAVERI-2026",
+      description: "Karnataka Crime Branch probe into an interstate absconder network running large-scale financial fraud across district borders. Surveillance, NBW execution and mule-account trails.",
+      date: "2026-08-19",
+      leadAgency: "Karnataka Police",
+      org: "POLICE",
+      state: "KARNATAKA",
+      created_at: "2026-08-19T09:00:00.000Z",
+    },
+  ];
+  for (const c of homeCases) {
+    await db.cases.insertOne(c);
   }
 
   // Case Membership seed: Operation Garuda, ShadowVault, and Interstate
@@ -926,6 +1028,60 @@ async function seedInitialData() {
       status: "ACTIVE",
       assigned_at: "2026-08-16T11:00:00.000Z",
       assigned_by: "user-cid-admin",
+    },
+    {
+      _id: "mem-009",
+      case_id: "case-blacktide",
+      user_id: "user-nia-lead",
+      user_name: "SP Farhan Qureshi, IPS",
+      user_email: "qureshi@nia.gov.in",
+      official_id: "NIA-LEAD-118",
+      agency: "National Investigation Agency (NIA)",
+      role: "NIA_LEAD",
+      status: "ACTIVE",
+      assigned_at: "2026-08-18T09:00:00.000Z",
+      assigned_by: "user-nia-admin",
+    },
+    {
+      _id: "mem-010",
+      case_id: "case-blacktide",
+      user_id: "user-nia-field",
+      user_name: "PSO Vishal Shetty",
+      user_email: "field@nia.gov.in",
+      official_id: "NIA-FLD-302",
+      agency: "National Investigation Agency (NIA)",
+      role: "NIA_FIELD",
+      status: "ACTIVE",
+      assigned_at: "2026-08-18T09:15:00.000Z",
+      assigned_by: "user-nia-admin",
+    },
+    {
+      _id: "mem-011",
+      case_id: "case-kaveri",
+      user_id: "user-ka-lead",
+      user_name: "PI Srinivas Rao",
+      user_email: "rao@karpolice.gov.in",
+      official_id: "KAR-LEAD-503",
+      agency: "Karnataka Police",
+      role: "POLICE_LEAD",
+      state: "KARNATAKA",
+      status: "ACTIVE",
+      assigned_at: "2026-08-19T09:00:00.000Z",
+      assigned_by: "user-ka-admin",
+    },
+    {
+      _id: "mem-012",
+      case_id: "case-kaveri",
+      user_id: "user-ka-field",
+      user_name: "PC Manjunath B.",
+      user_email: "manjunath@karpolice.gov.in",
+      official_id: "KAR-FLD-702",
+      agency: "Karnataka Police",
+      role: "POLICE_FIELD",
+      state: "KARNATAKA",
+      status: "ACTIVE",
+      assigned_at: "2026-08-19T09:15:00.000Z",
+      assigned_by: "user-ka-admin",
     },
   ];
 
@@ -1385,6 +1541,9 @@ const memoryBackend = {
       memoryDb.entities.set(id, updated);
       return updated;
     },
+    deleteOne: async (id: string) => {
+      return memoryDb.entities.delete(id);
+    },
   },
 
   relationships: {
@@ -1410,6 +1569,9 @@ const memoryBackend = {
       const updated = { ...existing, ...updates };
       memoryDb.relationships.set(id, updated);
       return updated;
+    },
+    deleteOne: async (id: string) => {
+      return memoryDb.relationships.delete(id);
     },
   },
 
@@ -1737,6 +1899,32 @@ const memoryBackend = {
     },
   },
 
+  // ---- State collaboration requests ----
+  collab_requests: {
+    find: async (query: { from_state?: string; to_state?: string; status?: string } = {}) => {
+      return Array.from(memoryDb.collab_requests.values())
+        .filter(
+          (r) =>
+            (!query.from_state || r.from_state === query.from_state) &&
+            (!query.to_state || r.to_state === query.to_state) &&
+            (!query.status || r.status === query.status)
+        )
+        .sort((a, b) => new Date(b.requested_at).getTime() - new Date(a.requested_at).getTime());
+    },
+    findOne: async (id: string) => memoryDb.collab_requests.get(id) || null,
+    insertOne: async (req: DBCollabRequest) => {
+      memoryDb.collab_requests.set(req._id, req);
+      return req;
+    },
+    updateOne: async (id: string, updates: Partial<DBCollabRequest>) => {
+      const existing = memoryDb.collab_requests.get(id);
+      if (!existing) return null;
+      const updated = { ...existing, ...updates };
+      memoryDb.collab_requests.set(id, updated);
+      return updated;
+    },
+  },
+
   // ---- Judicial dossier signatures ----
   dossier_signatures: {
     find: async (query: { case_id?: string } = {}) => {
@@ -1775,12 +1963,59 @@ const memoryBackend = {
       return updated;
     },
   },
+
+  // ---- Admin: cascade-delete a case + every case-scoped record ----
+  deleteCaseCascade: async (caseId: string) => {
+    const sweep = (map: Map<string, any>) => {
+      for (const [k, v] of Array.from(map.entries())) {
+        if ((v as any)?.case_id === caseId) map.delete(k);
+      }
+    };
+    const memberCount = Array.from(memoryDb.case_members.values()).filter(
+      (m: any) => m.case_id === caseId
+    ).length;
+    const evidenceCount = Array.from(memoryDb.evidence.values()).filter(
+      (e: any) => e.case_id === caseId
+    ).length;
+    sweep(memoryDb.case_members);
+    sweep(memoryDb.evidence);
+    sweep(memoryDb.entities);
+    sweep(memoryDb.relationships);
+    sweep(memoryDb.firs);
+    sweep(memoryDb.cdrs);
+    sweep(memoryDb.financials);
+    sweep(memoryDb.intels);
+    sweep(memoryDb.observations);
+    sweep(memoryDb.investigation_events);
+    sweep(memoryDb.audit_logs);
+    sweep(memoryDb.case_diary);
+    sweep(memoryDb.arrest_memos);
+    sweep(memoryDb.history_sheets);
+    sweep(memoryDb.custody);
+    sweep(memoryDb.charge_sheets);
+    sweep(memoryDb.cyber_incidents);
+    sweep(memoryDb.ingestion_batches);
+    sweep(memoryDb.staged_entities);
+    sweep(memoryDb.staged_links);
+    sweep(memoryDb.innocent_pool);
+    sweep(memoryDb.transfers);
+    sweep(memoryDb.requisitions);
+    sweep(memoryDb.case_access_requests);
+    sweep(memoryDb.dossier_signatures);
+    // mesh_peers + collab_requests are global (no case_id) — leave untouched.
+    // Finally delete the case itself (keyed by id, with _id fallback).
+    if (memoryDb.cases.has(caseId)) memoryDb.cases.delete(caseId);
+    for (const [k, v] of Array.from(memoryDb.cases.entries())) {
+      if ((v as any)?.id === caseId || (v as any)?._id === caseId) memoryDb.cases.delete(k);
+    }
+    return { memberCount, evidenceCount };
+  },
 };
 
 export type DbBackend = typeof memoryBackend;
 
 /** Active backend — memory by default, Mongo after initDatabase() when configured. */
-export let db: DbBackend = memoryBackend;
+export let db: DbBackend = withVaultCryptoBackend(memoryBackend);
 
 /** True when the Mongo backend is active (surfaced in /api/health). */
 export let isMongoBackend = false;
@@ -1791,7 +2026,7 @@ export async function initDatabase(): Promise<{ isMongo: boolean }> {
     try {
       const { createMongoBackend } = await import("./mongo");
       const mongo = await createMongoBackend(mongoUrl, (process.env.MONGO_DB || "crimintel").trim() || "crimintel");
-      db = mongo as DbBackend;
+      db = withVaultCryptoBackend(mongo as DbBackend);
       isMongoBackend = true;
       console.log("[DATABASE] MongoDB vault store connected.");
       const existing = await db.users.find();
@@ -1800,6 +2035,24 @@ export async function initDatabase(): Promise<{ isMongo: boolean }> {
         await seedInitialData();
       } else {
         console.log(`[DATABASE] Vault holds ${existing.length} officer accounts — skipping seed.`);
+        // One-time backfill: CID went statewise (like POLICE). Legacy CID
+        // users/cases with no state default to MAHARASHTRA so they resolve
+        // to CID:MAHARASHTRA instead of the bare legacy "CID" tenant.
+        try {
+          for (const u of existing) {
+            if (String((u as any).role || "").startsWith("CID_") && !(u as any).state) {
+              await db.users.updateOne((u as any)._id, { state: "MAHARASHTRA" } as any);
+            }
+          }
+          const allCases = await db.cases.find();
+          for (const c of allCases as any[]) {
+            if (String(c.org || "").toUpperCase() === "CID" && !c.state) {
+              await db.cases.updateOne(c._id || c.id, { state: "MAHARASHTRA" } as any);
+            }
+          }
+        } catch (e: any) {
+          console.warn(`[DATABASE] CID state backfill skipped: ${e.message}`);
+        }
       }
       return { isMongo: true };
     } catch (err: any) {
@@ -1807,6 +2060,106 @@ export async function initDatabase(): Promise<{ isMongo: boolean }> {
     }
   }
   console.log("[DATABASE] Initializing high-performance integrated memory security vault store.");
-  await seedInitialData();
+  if (!restoreVault()) {
+    await seedInitialData();
+    saveVaultNow();
+  } else {
+    console.log("[DATABASE] Restored vault snapshot from disk — cases and rosters preserved across restarts.");
+  }
+  startVaultAutosave();
   return { isMongo: false };
+}
+
+// ---------------------------------------------------------------------------
+// Disk persistence for the memory vault (no external DB required).
+// Snapshots every live Map to VAULT_FILE so created cases, rosters, staging
+// queues and audit ledgers survive server restarts. Mongo deployments bypass
+// this entirely (persistence is native there).
+// ---------------------------------------------------------------------------
+
+function vaultFilePath(): string {
+  const configured = (process.env.VAULT_FILE || "").trim();
+  if (configured) return configured;
+  return path.join(process.cwd(), "data", "vault-snapshot.json");
+}
+
+function snapshotMaps(): Record<string, Array<[string, any]>> {
+  const out: Record<string, Array<[string, any]>> = {};
+  for (const [k, v] of Object.entries(memoryDb)) {
+    if (v instanceof Map) out[k] = Array.from((v as Map<string, any>).entries());
+  }
+  return out;
+}
+
+/** Synchronous snapshot write (safe to call from exit hooks). */
+export function saveVaultNow(): void {
+  try {
+    const file = vaultFilePath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const payload = JSON.stringify({ version: 1, savedAt: new Date().toISOString(), maps: snapshotMaps() });
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, payload);
+    fs.renameSync(tmp, file);
+  } catch (err: any) {
+    console.error(`[DATABASE] Vault snapshot failed: ${err.message}`);
+  }
+}
+
+let vaultSaveTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Restore maps from the last snapshot. Returns true when restored. */
+export function restoreVault(): boolean {
+  try {
+    const file = vaultFilePath();
+    if (!fs.existsSync(file)) return false;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!parsed || typeof parsed !== "object" || !parsed.maps) return false;
+    let restored = 0;
+    for (const [k, entries] of Object.entries(parsed.maps as Record<string, Array<[string, any]>>)) {
+      const target = (memoryDb as any)[k];
+      if (target instanceof Map && Array.isArray(entries)) {
+        target.clear();
+        for (const [ek, ev] of entries) target.set(ek, ev);
+        restored++;
+      }
+    }
+    return restored > 0;
+  } catch (err: any) {
+    console.error(`[DATABASE] Vault restore failed (${err.message}) — reseeding.`);
+    return false;
+  }
+}
+
+function startVaultAutosave(): void {
+  if (vaultSaveTimer) return;
+  try {
+    const t = setInterval(() => saveVaultNow(), 20000);
+    (t as any)?.unref?.();
+    vaultSaveTimer = t;
+  } catch {
+    /* timers unavailable — exit hooks still cover shutdown */
+  }
+  let hooked = false;
+  try {
+    const flush = () => {
+      try {
+        saveVaultNow();
+      } catch {
+        /* shutting down */
+      }
+    };
+    if (!hooked) {
+      hooked = true;
+      process.once("SIGINT", () => {
+        flush();
+        process.exit(0);
+      });
+      process.once("SIGTERM", () => {
+        flush();
+        process.exit(0);
+      });
+    }
+  } catch {
+    /* signal hooks unavailable */
+  }
 }

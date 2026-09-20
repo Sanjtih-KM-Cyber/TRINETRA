@@ -4,7 +4,9 @@ import {
   SourceSnippet,
   EvidenceFileRecord,
 } from "../types";
-import { extractEntitiesUniversal, generateFileHash } from "./nlpExtractor";
+import { generateFileHash, extractEntitiesUniversal } from "./nlpExtractor";
+import { sahayakApi } from "./api";
+import type { ExtractionResult } from "./nlpExtractor";
 
 export type OSINTPlatform = 
   | "TWITTER" 
@@ -154,8 +156,8 @@ export async function ingestOSINT(input: OSINTIngestInput): Promise<OSINTIngestR
     const docHash = generateFileHash(rawContent, `OSINT_${input.platform}_${normalizeHandle(input.authorHandle)}`);
     const docId = `OSINT-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
     
-    // 3. Extract entities using universal pipeline
-    const extraction = await extractEntitiesUniversal(rawContent, `OSINT_${input.platform}`, "LOCAL_OFFLINE");
+    // 3. SAHAYAK model extraction (Groq-backed; failures surface honestly)
+    const extraction: ExtractionResult = await sahayakApi.extract(rawContent, `OSINT_${input.platform}`);
     
     // 4. Stamp with OSINT metadata
     const nodes = createOSINTNodesFromExtraction(extraction, input, docId, docHash);

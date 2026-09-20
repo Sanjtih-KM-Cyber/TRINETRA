@@ -43,6 +43,18 @@ export const DataRequestInbox: React.FC<DataRequestInboxProps> = ({
 
   useEffect(() => {
     load();
+    // Live directive feed: assignees see new Lead requisitions without refresh.
+    const timer = window.setInterval(() => {
+      load().catch(() => undefined);
+    }, 15000);
+    const onFocus = () => {
+      load().catch(() => undefined);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseId]);
 
@@ -83,11 +95,18 @@ export const DataRequestInbox: React.FC<DataRequestInboxProps> = ({
     }
   };
 
+  const pendingCount = items.filter((r) => r.status === "PENDING" && (!ownFunctional || r.targetFunctional === ownFunctional)).length;
+
   return (
     <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3.5 space-y-2.5">
       <h4 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
         <Send className="w-3.5 h-3.5 text-amber-400" />
         Data requisitions {ownFunctional ? `· ${ownFunctional} inbox` : "· Lead pipeline"}
+        {pendingCount > 0 && (
+          <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-500 text-slate-950">
+            {pendingCount} new
+          </span>
+        )}
       </h4>
 
       {msg && (

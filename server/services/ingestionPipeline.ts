@@ -176,6 +176,59 @@ export async function processIngestionPipeline(input: IngestionInput): Promise<I
         confidence: observationMetadata.confidenceScore || 0.95,
       }));
     }
+
+    // SAHAYAK auto-extract: the narrative itself is converted to candidate
+    // entities/links so the Lead's Extracted-data review queue fills even
+    // when the officer tags nothing manually. Explicit tags win on duplicates.
+    if (normalizedRaw && normalizedRaw.trim().length >= 3) {
+      const seen = new Set(
+        candidateNodes.map((n: any) => `${n.type}::${String(n.label || "").toLowerCase().trim()}`)
+      );
+      const pushNlp = (nodes: any[], links: any[]) => {
+        for (const n of nodes || []) {
+          if (!n?.label) continue;
+          const k = `${n.type || "PERSON"}::${String(n.label).toLowerCase().trim()}`;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          candidateNodes.push({
+            id: n.id || `nlp-field-${Date.now()}-${candidateNodes.length}`,
+            label: n.label,
+            type: n.type || "PERSON",
+            role: n.role || "Investigative Subject",
+            category: "EVIDENCE",
+            reviewState: "CONFIRMED",
+            riskScore: n.riskScore || 70,
+            confidence: n.confidence || 0.9,
+            details: { source: "SAHAYAK narrative extraction", ...(n.details || {}) },
+          });
+        }
+        for (const l of links || []) {
+          candidateLinks.push({
+            id: l.id || `nlp-field-rel-${Date.now()}-${candidateLinks.length}`,
+            source: typeof l.source === "object" ? l.source.id || l.source.label : l.source,
+            target: typeof l.target === "object" ? l.target.id || l.target.label : l.target,
+            relationType: l.relationType || "ASSOCIATED_WITH",
+            category: "EVIDENCE",
+            reviewState: "CONFIRMED",
+            provenance: "FIELD_OBSERVATION" as const,
+            status: "EXTRACTED" as const,
+            creator_id: actor.id,
+            creator_name: actor.name,
+            creator_role: actor.role,
+            weight: l.weight || 0.85,
+            details: l.details || `SAHAYAK-extracted from field narrative by ${actor.name}.`,
+            confidence: l.confidence || 0.9,
+          });
+        }
+      };
+      try {
+        const nlp = await extractEntitiesUniversal(normalizedRaw, normalizedFileName);
+        pushNlp(nlp.nodes, nlp.links);
+      } catch {
+        const fallback = extractEntitiesRuleBased(normalizedRaw);
+        pushNlp(fallback.nodes, fallback.links);
+      }
+    }
   } else if (fileType === "CDR_CSV") {
     const parsed = parseCDRCSV(normalizedRaw);
     const tempNodeMap = new Map<string, any>();

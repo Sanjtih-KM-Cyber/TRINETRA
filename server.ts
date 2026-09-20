@@ -1,4 +1,5 @@
 import express from "express";
+import cors from "cors";
 import http from "http";
 import path from "path";
 import fs from "fs";
@@ -18,12 +19,39 @@ import stagingRouter from "./server/routes/staging";
 import sahayakRouter from "./server/routes/sahayak";
 import cyberRouter from "./server/routes/cyber";
 import migrationRouter from "./server/routes/migration";
+import collaborationRouter from "./server/routes/collaboration";
 import { authenticateToken as chunkAuth, type AuthenticatedRequest as ChunkReq } from "./server/auth";
+import { authenticateToken } from "./server/auth";
 import { extractEntitiesUniversal, extractEntitiesRuleBased } from "./src/services/nlpExtractor";
 
 dotenv.config();
 
 const app = express();
+// Render / proxies: client IPs arrive via X-Forwarded-For (rate limiters read them).
+app.set("trust proxy", 1);
+// Split-deploy (Vercel frontend → Render backend): allow the frontend origin(s).
+// FRONTEND_URL="https://trinetra.vercel.app" or comma-separated list. Unset = same-origin only.
+const FRONTEND_URLS = (process.env.FRONTEND_URL || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+app.use(
+  cors({
+    origin: FRONTEND_URLS.length > 0 ? FRONTEND_URLS : false,
+    credentials: true,
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-VPN-Session",
+      "x-file-id",
+      "x-file-name",
+      "x-chunk-index",
+      "x-total-chunks",
+      "x-total-bytes",
+    ],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  })
+);
 const PORT = Number(process.env.PORT || 3000);
 const IS_PROD = process.env.NODE_ENV === "production";
 
@@ -115,6 +143,8 @@ setInterval(() => {
 // pass through, otherwise the gateway page itself can never load its JS.
 const vpnGatewayMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (
+    req.path === "/healthz" ||
+    req.path === "/api/health" ||
     req.path.startsWith("/vpn-gateway") ||
     req.path.startsWith("/api/vpn") ||
     req.path.startsWith("/assets/") ||
@@ -147,8 +177,17 @@ const vpnGatewayMiddleware = (req: express.Request, res: express.Response, next:
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Health check (accessible without VPN)
-app.get("/api/health", (_req, res) => {
+// Health checks (accessible without VPN — Render uses /healthz).
+// Registered BEFORE the VPN middleware so they never redirect.
+app.get("/healthz", (_req, res) => res.json({ ok: true }));
+app.get("/api/health", async (_req, res) => {
+  let vault = null;
+  try {
+    const { vaultCryptoStatus } = await import("./server/services/vaultCrypto");
+    vault = vaultCryptoStatus();
+  } catch {
+    vault = { encrypted: false };
+  }
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
@@ -156,6 +195,7 @@ app.get("/api/health", (_req, res) => {
     gateway: VPN_GATEWAY_ID,
     backend: isMongoBackend ? "mongodb" : "memory",
     uptimeSec: Math.floor(process.uptime()),
+    vault,
   });
 });
 
@@ -187,16 +227,12 @@ app.get("/vpn-gateway", async (req, res, next) => {
 // (Officer Sign-In → POST /api/auth/login).
 app.post("/api/vpn/handshake", vpnAuthLimiter, async (req, res) => {
   try {
-    const { clientCertPem } = req.body as {
+    // NOTE: Operator decision — officer certificate upload retired from the
+    // VPN tunnel screen. clientCertPem accepted only for backwards compat
+    // and is otherwise ignored; tunnel auth is OTP-bound at Sign-In.
+    const { clientCertPem } = (req.body || {}) as {
       clientCertPem?: string;
     };
-
-    // mTLS still required in production.
-    if (!CCTNS_DEMO_MODE) {
-      if (!clientCertPem || !clientCertPem.includes("BEGIN CERTIFICATE")) {
-        return res.status(401).json({ error: "mTLS required", message: "Officer client certificate (.pem) required in production mode." });
-      }
-    }
 
     const token = `vpn_${Date.now()}_${crypto.randomBytes(12).toString("hex")}`;
     const now = Date.now();
@@ -215,10 +251,13 @@ app.post("/api/vpn/handshake", vpnAuthLimiter, async (req, res) => {
       otpExpiresAt: now + 10 * 60 * 1000,
     });
 
+    // Cross-site (Vercel → Render) needs SameSite=None + Secure so the
+    // cookie is stored; header auth (X-VPN-Session) remains the primary path.
+    const crossSite = FRONTEND_URLS.length > 0;
     res.cookie("vpn_session", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      secure: process.env.NODE_ENV === "production" || crossSite,
+      sameSite: crossSite ? "none" : "strict",
       maxAge: VPN_SESSION_TTL_MS,
     });
     res.setHeader("X-VPN-Session", token);
@@ -282,6 +321,7 @@ app.use(vpnGatewayMiddleware);
 app.use("/api/auth", authRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/migration", migrationRouter);
+app.use("/api/collab", collaborationRouter);
 app.use("/api/cases", casesRouter);
 app.use("/api/cases", investigatorRouter);
 app.use("/api/cases", proceedingsRouter);
@@ -416,36 +456,119 @@ app.post("/api/extract-entities/rule-based", async (req, res) => {
   }
 });
 
-// API: Automated Court-Ready Intelligence Dossier Generation
-app.post(["/api/dossier", "/api/generate-dossier"], async (req, res) => {
+// API: SAHAYAK extraction proxy — model-authoritative entity/relationship
+// extraction over Groq (or the configured provider). No silent fallbacks:
+// failures surface as 502 so the UI never presents rules as model output.
+app.post("/api/extract-entities/sahayak", authenticateToken, async (req, res) => {
+  try {
+    const { text, fileName } = req.body;
+    if (!text || typeof text !== "string" || text.trim().length < 10) {
+      return res.status(400).json({ error: "Text payload (min 10 chars) is required." });
+    }
+    if (text.length > 120000) {
+      return res.status(400).json({ error: "Text payload exceeds 120000 chars." });
+    }
+    const { getLastUsedProvider, getLastUsedModel } = await import("./src/services/llmClient");
+    const result = await extractEntitiesUniversal(text, fileName || "SAHAYAK Exhibit", undefined, { strict: true });
+    return res.json({
+      ...result,
+      engine: "SAHAYAK",
+      provider: getLastUsedProvider(),
+      model: getLastUsedModel(),
+    });
+  } catch (error: unknown) {
+    console.error("Error in SAHAYAK extraction:", error);
+    const msg = error instanceof Error ? error.message : "SAHAYAK extraction failed.";
+    return res.status(502).json({ error: msg });
+  }
+});
+
+// API: SAHAYAK dossier synthesis — drafted live by the configured model
+// (Groq). No templated mock output: failures surface as 502.
+app.post(["/api/dossier", "/api/generate-dossier"], authenticateToken, async (req, res) => {
   try {
     const { caseDataset, caseTitle, nodes, links, patterns, communities } = req.body;
-    const effectiveCase = caseDataset || {
-      name: caseTitle || "Syndicate Interdiction",
-      codeName: "OP-GARUDA-2026",
-      nodes: nodes || [],
-      links: links || [],
-      firs: [],
-      cdrs: [],
-      financials: [],
-      intels: [],
-    };
-
-    // Import dynamically to avoid circular dependency
-    const { generateDossierWithGemini } = await import("./src/services/nlpExtractor");
-
-    const dossierText = await generateDossierWithGemini(
-      effectiveCase,
-      effectiveCase.nodes || [],
-      effectiveCase.links || [],
-      patterns || [],
-      communities || []
+    const graphNodes = nodes || caseDataset?.nodes || [];
+    const graphLinks = links || caseDataset?.links || [];
+    const caseName = caseDataset?.name || caseTitle || "Syndicate Interdiction";
+    const codeName = caseDataset?.codeName || "OP-UNSPECIFIED";
+    if (graphNodes.length === 0) {
+      return res.status(400).json({ error: "Dossier synthesis needs at least one graph entity." });
+    }
+    const { callLLMWithSchema, getLastUsedProvider, getLastUsedModel } = await import("./src/services/llmClient");
+    const suspectLines = graphNodes
+      .slice(0, 40)
+      .map((n: any) => `- ${n.label} [${n.type}] role=${n.role || "?"} risk=${n.riskScore ?? "?"} betweenness=${n.betweenness ?? "?"}`)
+      .join("\n");
+    const patternLines = (patterns || []).slice(0, 20).map((p: any) => `- [${p.severity}] ${p.title}: ${p.description}`).join("\n");
+    const drafted = await callLLMWithSchema<{
+      executiveSummary: string;
+      keySuspects: Array<{ name: string; role: string; riskScore: number; allegedActs: string }>;
+      suspiciousPatterns: Array<{ patternTitle: string; severity: string; evidenceSummary: string; actionableLead: string }>;
+      actionableNextSteps: string[];
+    }>(
+      [
+        {
+          role: "system",
+          content: "You are SAHAYAK, drafting a court-grade intelligence dossier section for Indian law enforcement. Ground every claim in the supplied graph facts. Name exact persons, exhibits and sections. Indian statutes only (BNS/BNSS/BSA/NDPS/UAPA/PMLA).",
+        },
+        {
+          role: "user",
+          content: `CASE: ${caseName} (${codeName})\nSUSPECTS:\n${suspectLines}\nPATTERNS:\n${patternLines || "none"}\nDraft: executiveSummary (3-5 sentences), keySuspects (top 8 with allegedActs tied to graph facts), suspiciousPatterns (mirror supplied patterns with evidenceSummary + actionableLead), actionableNextSteps (4 concrete directives).`,
+        },
+      ],
+      {
+        type: "object",
+        properties: {
+          executiveSummary: { type: "string" },
+          keySuspects: { type: "array" },
+          suspiciousPatterns: { type: "array" },
+          actionableNextSteps: { type: "array" },
+        },
+        required: ["executiveSummary", "keySuspects", "suspiciousPatterns", "actionableNextSteps"],
+      }
     );
-    return res.json({ dossier: dossierText, dossierText });
+    return res.json({
+      dossier: {
+        caseTitle: `${codeName} - ${caseName}`,
+        caseNumber: codeName,
+        generatedAt: new Date().toISOString(),
+        classification: "CONFIDENTIAL // FOR LAW ENFORCEMENT & JUDICIAL PROSECUTION ONLY",
+        executiveSummary: drafted.executiveSummary,
+        keySuspects: (drafted.keySuspects || []).map((s: any, i: number) => ({
+          id: `sus-${i}`,
+          name: s.name,
+          role: s.role,
+          riskScore: s.riskScore,
+          centralityMetric: "SAHAYAK-drafted",
+          knownAliases: [],
+          allegedActs: s.allegedActs,
+        })),
+        subSyndicateBreakdown: (communities || []).map((c: any) => ({
+          communityName: c.name,
+          purpose: c.role,
+          memberCount: (c.nodeIds || []).length,
+          topLeader: c.keyLeaderId,
+        })),
+        suspiciousPatternsDetected: (drafted.suspiciousPatterns || []).map((p: any) => ({
+          patternTitle: p.patternTitle,
+          severity: p.severity,
+          evidenceSummary: p.evidenceSummary,
+          actionableLead: p.actionableLead,
+        })),
+        actionableNextSteps: drafted.actionableNextSteps || [],
+        officerDecisions: [],
+        digitalSignatures: [],
+        playbook: [],
+      },
+      engine: "SAHAYAK",
+      provider: getLastUsedProvider(),
+      model: getLastUsedModel(),
+    });
   } catch (error: unknown) {
     console.error("Error in dossier generation:", error);
-    const msg = error instanceof Error ? error.message : "Failed to generate intelligence dossier.";
-    return res.status(500).json({ error: msg });
+    const msg = error instanceof Error ? error.message : "SAHAYAK dossier synthesis failed.";
+    return res.status(502).json({ error: msg });
   }
 });
 
@@ -461,16 +584,26 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== "production") {
     viteDevServer = await createViteServer({
-      server: { middlewareMode: true },
+      // Ignore backend runtime files: the vault autosave rewrites
+      // data/vault-snapshot.json every 20s — watching it causes
+      // "[vite] page reload data/vault-snapshot.json" spam.
+      server: {
+        middlewareMode: true,
+        watch: { ignored: ["**/data/**", "**/uploads/**", "**/dist/**", "**/*.tmp"] },
+      },
       appType: "spa",
     });
     app.use(viteDevServer.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.use((_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    // API-only mode (SKIP_STATIC=true when the frontend ships
+    // separately on Vercel). /healthz is registered above (pre-middleware).
+    if (process.env.SKIP_STATIC !== "true") {
+      const distPath = path.join(process.cwd(), "dist");
+      app.use(express.static(distPath));
+      app.use((_req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
   }
 
   server.listen(PORT, "0.0.0.0", () => {

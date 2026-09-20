@@ -5,34 +5,21 @@ import {
   CrimeNetworkLink,
   SuspiciousPattern,
   SyndicateCommunity,
-  CourtDossier,
   AuditLogEntry,
 } from "../types";
 import { useAuth } from "../context/AuthContext";
-import { caseApi } from "../services/api";
-import { agencyToDepartment } from "../data/departments";
-import { generateDossierWithGemini } from "../services/nlpExtractor";
-import { generatePlaybook } from "../services/actionableIntelEngine";
+import { caseApi, sahayakApi } from "../services/api";
 import {
-  FileText,
   X,
   Printer,
   Copy,
-  Download,
-  ShieldCheck,
-  ShieldAlert,
-  Crown,
-  Check,
   Sparkles,
-  AlertTriangle,
-  Hash,
-  User,
-  CheckCircle2,
-  XCircle,
-  HelpCircle,
   AlertCircle,
-  FileSignature,
-  ClipboardCheck,
+  Plus,
+  Trash2,
+  Gavel,
+  User,
+  ArrowRight,
 } from "lucide-react";
 
 interface DossierModalProps {
@@ -46,6 +33,31 @@ interface DossierModalProps {
   auditLogs?: AuditLogEntry[];
 }
 
+interface AccusedPerson {
+  nodeId: string;
+  name: string;
+  role: string;
+  sections: string[];
+  allegations: string;
+  evidenceRefs: string[];
+}
+
+interface ManualPoint {
+  id: string;
+  text: string;
+}
+
+interface WarrantDraft {
+  accused: AccusedPerson[];
+  manualPoints: ManualPoint[];
+  courtName: string;
+  venue: string;
+  ioName: string;
+  ioRank: string;
+  ioBadge: string;
+  filingDate: string;
+}
+
 export const DossierModal: React.FC<DossierModalProps> = ({
   isOpen,
   onClose,
@@ -56,1201 +68,433 @@ export const DossierModal: React.FC<DossierModalProps> = ({
   communities,
   auditLogs,
 }) => {
-  const [dossier, setDossier] = useState<CourtDossier | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [copied, setCopied] = useState(false);
   const { user } = useAuth();
-
-  // Phase 8 Req33 — judicial filing particulars (court-admissible header block).
-  const dept = useMemo(() => agencyToDepartment(currentCase.leadAgency || ""), [currentCase.leadAgency]);
-  const [courtName, setCourtName] = useState("Special Court");
-  const [venue, setVenue] = useState("Mumbai");
-  const [jurisdiction, setJurisdiction] = useState(dept.jurisdiction);
-  const [regNumber, setRegNumber] = useState(currentCase.codeName);
-  const [filingDate, setFilingDate] = useState(new Date().toISOString().split("T")[0]);
-  const [ioName, setIoName] = useState(user?.name || "");
-  const [ioRank, setIoRank] = useState(user?.designation || "");
-  const [ioBadge, setIoBadge] = useState(user?.official_id || "");
+  const [step, setStep] = useState<"select" | "sections" | "review" | "final">("select");
+  const [warrant, setWarrant] = useState<WarrantDraft>({
+    accused: [],
+    manualPoints: [],
+    courtName: "Special Court",
+    venue: "Mumbai",
+    ioName: user?.name || "",
+    ioRank: user?.designation || "",
+    ioBadge: user?.official_id || "",
+    filingDate: new Date().toISOString().split("T")[0],
+  });
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generatedText, setGeneratedText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [liveEvidence, setLiveEvidence] = useState<any[]>([]);
-  const [liveMembers, setLiveMembers] = useState<any[]>([]);
   const [liveFirs, setLiveFirs] = useState<any[]>([]);
-  const [signatures, setSignatures] = useState<any[]>([]);
-  const [signBusy, setSignBusy] = useState(false);
-  const [signMsg, setSignMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
-    setJurisdiction(dept.jurisdiction);
-    setRegNumber(currentCase.codeName);
-    if (user) {
-      setIoName((v) => v || user.name);
-      setIoRank((v) => v || user.designation);
-      setIoBadge((v) => v || user.official_id);
-    }
-    caseApi
-      .getCaseState(currentCase.id)
-      .then((st) => {
-        setLiveEvidence(st.evidenceFiles || []);
-        setLiveMembers(st.members || []);
-        setLiveFirs(st.firs || []);
-      })
-      .catch(() => undefined);
-    caseApi
-      .getDossierSignatures(currentCase.id)
-      .then((r) => setSignatures(r.signatures || []))
-      .catch(() => setSignatures([]));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    caseApi.getCaseState(currentCase.id).then((st) => {
+      setLiveEvidence(st.evidenceFiles || []);
+      setLiveFirs(st.firs || []);
+    }).catch(() => undefined);
   }, [isOpen, currentCase.id]);
 
-  const playbookSteps = useMemo(() => {
-    const cutVerts = nodes.filter((n) => n.isCutVertex).map((n) => n.id);
-    return generatePlaybook({
-      caseId: currentCase.id,
-      nodes,
-      links,
-      patterns,
-      communities,
-      cutVertices: cutVerts,
-      recentAuditLogs: auditLogs,
+  // Get person nodes from the graph
+  const personNodes = useMemo(() =>
+    nodes.filter((n) => n.type === "PERSON" && n.reviewState === "CONFIRMED"),
+    [nodes]
+  );
+
+  // Step 1: Select accused persons
+  const toggleAccused = (node: CrimeNetworkNode) => {
+    setWarrant((w) => {
+      const exists = w.accused.find((a) => a.nodeId === node.id);
+      if (exists) {
+        return { ...w, accused: w.accused.filter((a) => a.nodeId !== node.id) };
+      }
+      return {
+        ...w,
+        accused: [
+          ...w.accused,
+          {
+            nodeId: node.id,
+            name: node.label,
+            role: node.role || "Accused",
+            sections: [],
+            allegations: "",
+            evidenceRefs: [],
+          },
+        ],
+      };
     });
-  }, [currentCase.id, nodes, links, patterns, communities, auditLogs]);
+  };
 
-  if (!isOpen) return null;
+  const isAccused = (nodeId: string) => warrant.accused.some((a) => a.nodeId === nodeId);
 
-  const handleGenerateDossier = async () => {
+  // Update accused details
+  const updateAccused = (nodeId: string, field: keyof AccusedPerson, value: any) => {
+    setWarrant((w) => ({
+      ...w,
+      accused: w.accused.map((a) =>
+        a.nodeId === nodeId ? { ...a, [field]: value } : a
+      ),
+    }));
+  };
+
+  // Add/remove manual points
+  const addManualPoint = () => {
+    setWarrant((w) => ({
+      ...w,
+      manualPoints: [...w.manualPoints, { id: `mp-${Date.now()}`, text: "" }],
+    }));
+  };
+
+  const removeManualPoint = (id: string) => {
+    setWarrant((w) => ({
+      ...w,
+      manualPoints: w.manualPoints.filter((p) => p.id !== id),
+    }));
+  };
+
+  const updateManualPoint = (id: string, text: string) => {
+    setWarrant((w) => ({
+      ...w,
+      manualPoints: w.manualPoints.map((p) => (p.id === id ? { ...p, text } : p)),
+    }));
+  };
+
+  // Generate arrest warrant via SAHAYAK
+  const generateWarrant = async () => {
+    if (warrant.accused.length === 0) {
+      setError("Select at least one accused person.");
+      return;
+    }
     setIsGenerating(true);
+    setError(null);
+
     try {
-      const generated = await generateDossierWithGemini(
-        currentCase.codeName,
-        nodes,
-        links,
-        patterns,
-        communities
-      );
-      setDossier(generated);
-    } catch (e) {
-      console.error(e);
+      // Build context for SAHAYAK
+      const accusedContext = warrant.accused.map((a) => {
+        const connectedLinks = links.filter(
+          (l) => (typeof l.source === "object" ? l.source.id : l.source) === a.nodeId ||
+                 (typeof l.target === "object" ? l.target.id : l.target) === a.nodeId
+        );
+        const evidence = liveEvidence.filter((e) => a.evidenceRefs.includes(e._id || e.id));
+        return {
+          name: a.name,
+          role: a.role,
+          sections: a.sections,
+          allegations: a.allegations,
+          evidence: evidence.map((e) => `${e.fileName} (${e.fileType})`),
+          connections: connectedLinks.map((l) => {
+            const s = typeof l.source === "object" ? l.source.label : l.source;
+            const t = typeof l.target === "object" ? l.target.label : l.target;
+            const rel = l.relationType;
+            return `${s} —[${rel}]— ${t}`;
+          }),
+        };
+      });
+
+      const manualPointsText = warrant.manualPoints.map((p) => p.text).filter(Boolean).join("\n");
+
+      const prompt = `You are a Senior Public Prosecutor drafting an arrest warrant and chargesheet section under Indian law.
+
+CASE: ${currentCase.name} (${currentCase.codeName})
+FIR: ${liveFirs.map((f) => `${f.firNumber} u/s ${(f.sections || []).join(", ")}`).join("; ") || "Details pending"}
+
+ACCUSED PERSONS:
+${accusedContext.map((a, i) => `${i + 1}. ${a.name} (${a.role})
+   Sections invoked: ${a.sections.join(", ") || "To be specified"}
+   Allegations: ${a.allegations || "To be drafted from evidence"}
+   Evidence: ${a.evidence.join("; ") || "To be linked"}
+   Known associations: ${a.connections.join("; ") || "None"}`).join("\n\n")}
+
+ADDITIONAL POINTS FROM INVESTIGATING OFFICER:
+${manualPointsText || "None"}
+
+COURT: ${warrant.courtName}, ${warrant.venue}
+IO: ${warrant.ioName}, ${warrant.ioRank} (${warrant.ioBadge})
+DATE: ${warrant.filingDate}
+
+Draft a formal arrest warrant / chargesheet section that reads like a human-written legal document — narrative, precise, and court-ready. Include:
+1. Formal address to the Court
+2. Brief facts of the case from FIR and investigation
+3. Specific role and allegations against each accused with evidence references
+4. Legal provisions invoked (exact sections from BNS/BNSS/BSA/NDPS/PMLA/UAPA as applicable)
+5. Prayer for arrest warrant / remand / chargesheet filing
+6. IO attestation block with designation and badge
+7. Leave space for Court seal and Magistrate signature
+
+Write in formal legal English, narrative style, not bullet points. Avoid risk scores, graph metrics, or algorithmic language. Use "the accused" not "the suspect".`;
+
+      const response = await sahayakApi.ask(prompt, currentCase.id);
+      setGeneratedText(response.answer);
+      setStep("review");
+    } catch (e: any) {
+      setError(e.message || "Failed to generate warrant. Check SAHAYAK connectivity.");
     } finally {
       setIsGenerating(false);
     }
   };
 
-  // Fallback / Initial default template if not generated by AI yet
-  const displayDossier: CourtDossier = dossier || {
-    caseTitle: `${currentCase.codeName} - ${currentCase.name}`,
-    caseNumber: currentCase.id,
-    generatedAt: new Date().toISOString(),
-    classification: "CONFIDENTIAL // FOR LAW ENFORCEMENT & JUDICIAL PROSECUTION ONLY",
-    executiveSummary: currentCase.description,
-    keySuspects: nodes
-      .filter((n) => n.isKingpinCandidate || n.riskScore >= 75)
-      .map((n) => ({
-        id: n.id,
-        name: n.label,
-        role: n.role || n.type,
-        riskScore: n.riskScore,
-        centralityMetric: `Betweenness: ${n.betweenness || "0.000"}, Degree: ${n.degree || 0}`,
-        knownAliases: n.aliases || [],
-        allegedActs: n.details?.notes || "Identified key coordinator across communication and funding trails.",
-      })),
-    subSyndicateBreakdown: communities.map((c) => ({
-      communityName: c.name,
-      purpose: c.role,
-      memberCount: c.nodeIds.length,
-      topLeader: nodes.find((n) => n.id === c.keyLeaderId)?.label || "Undisclosed",
-    })),
-    suspiciousPatternsDetected: patterns.map((p) => ({
-      patternTitle: p.title,
-      severity: p.severity,
-      evidenceSummary: p.description,
-      actionableLead: p.actionableLead,
-    })),
-    actionableNextSteps: [
-      "Issue Look-Out Circulars (LOC) at all international air terminals for Kingpin candidates.",
-      "Execute Section 102 CrPC freeze directives on identified mule bank accounts.",
-      "Requisition Section 91 CrPC call detail records and GPRS logs for flagged burner IMEIs.",
-      "Issue non-bailable search warrants for identified safehouses.",
-    ],
-    officerDecisions: buildOfficerDecisions(auditLogs || [], nodes, links),
-    digitalSignatures: buildDigitalSignatures(auditLogs || []),
-    playbook: playbookSteps.map((s) => ({
-      id: s.id,
-      priority: s.priority,
-      title: s.title,
-      description: s.description,
-      statute: s.legalBasis.statute,
-      provision: s.legalBasis.provision,
-      authority: s.legalBasis.authority,
-      responsibleRole: s.responsibleRole,
-      deadlineDays: s.deadlineDays,
-      evidenceToCollect: s.evidenceToCollect,
-      expectedOutcome: s.expectedOutcome,
-      completed: s.completed,
-      completedAt: s.completedAt,
-      completedBy: s.completedBy,
-    })),
-  };
-
-  // Build officer decisions from audit logs
-  function buildOfficerDecisions(logs: AuditLogEntry[], nodes: CrimeNetworkNode[], links: CrimeNetworkLink[]) {
-    const reviewLogs = logs.filter(
-      (l) => l.actionType === "EVIDENCE_REVIEW" || l.action?.includes("REVIEW")
-    );
-    return reviewLogs.map((log) => {
-      const metadata = log.metadata as any;
-      const targetNode = nodes.find((n) => n.id === log.targetId);
-      const targetLink = links.find((l) => l.id === log.targetId);
-      return {
-        officerId: log.user_id,
-        officerName: log.user_name,
-        officerRank: log.user_role,
-        targetType: log.targetType || (targetNode ? "NODE" : targetLink ? "LINK" : "UNKNOWN"),
-        targetLabel: log.targetLabel,
-        previousState: metadata?.previousState || "NEEDS_REVIEW",
-        newState: metadata?.newState || "CONFIRMED",
-        note: metadata?.note || "",
-        timestamp: log.timestamp,
-        digitalHash: log.digital_hash,
-        action: log.action,
-      };
-    });
-  }
-
-  // Build digital signatures from audit logs
-  function buildDigitalSignatures(logs: AuditLogEntry[]) {
-    return logs
-      .filter((l) => l.digital_hash)
-      .map((log) => ({
-        officerId: log.user_id,
-        officerName: log.user_name,
-        officerRank: log.user_role,
-        action: log.action,
-        targetType: log.targetType,
-        targetLabel: log.targetLabel,
-        timestamp: log.timestamp,
-        digitalHash: log.digital_hash,
-        verified: true,
-      }));
-  }
-
-  // ---------------------------------------------------------------------------
-  // Phase 8 Req33 — formal judicial dossier engine (court-admissible).
-  // Court header + seal + registration number; date/venue/jurisdiction;
-  // Case Facts; Accused/Suspect Profiles; Exhibits & Evidence Matrix with
-  // provenance; Chronological Findings; Statutory Citations (IPC/BNS,
-  // CrPC/BNSS, Special Acts); IO Attestation. Serif typography, evidentiary
-  // tables, formal margins, running headers, Page X of Y footers.
-  // ---------------------------------------------------------------------------
-  const esc = (s: any) =>
-    String(s ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-
-  const sealFile =
-    dept.code === "CBI" ? "cbi.svg" : dept.code === "NIA" ? "nia.svg" : dept.code === "CID" ? "cid.svg" : "state-police.svg";
-  const sealUrl = `${window.location.origin}/assets/logos/${sealFile}`;
-
-  const statuteGroups = useMemo(() => {
-    const groups: Record<string, string[]> = { "IPC / BNS": [], "CrPC / BNSS": [], "Special Acts": [] };
-    const seen = new Set<string>();
-    for (const s of playbookSteps) {
-      const label = `${s.legalBasis.statute} — ${s.legalBasis.provision}`.trim();
-      if (!label || label === "—" || seen.has(label)) continue;
-      seen.add(label);
-      if (/NDPS|UAPA|PMLA|ARMS|IT ACT|PREVENTION OF CORRUPTION|COFEPOSA|NIA ACT/i.test(label)) groups["Special Acts"].push(label);
-      else if (/CRPC|BNSS|CR\.?P\.?C|BNSS|41|41A|102|154|161|164|172|173|65B|63 BSA/i.test(label)) groups["CrPC / BNSS"].push(label);
-      else groups["IPC / BNS"].push(label);
-    }
-    if (Object.values(groups).every((g) => g.length === 0)) {
-      groups["CrPC / BNSS"].push("Sec 172 CrPC / Sec 176 BNSS — Case Diary", "Sec 65B Indian Evidence Act / Sec 63 BSA — Electronic Records");
-    }
-    return groups;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playbookSteps.length]);
-
-  const chronology = useMemo(() => {
-    const rows: Array<{ date: string; event: string }> = [];
-    for (const f of liveFirs as any[]) rows.push({ date: String((f as any).date || (f as any).registeredAt || ""), event: `FIR ${(f as any).firNumber || ""} registered — ${((f as any).sections || []).join(", ")}` });
-    for (const e of liveEvidence) rows.push({ date: String(e.uploadedAt || "").slice(0, 10), event: `Exhibit ${e.fileName} ingested (${e.sourceAuthority || "vault"})` });
-    return rows
-      .filter((r) => r.date)
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .slice(0, 60);
-  }, [liveFirs, liveEvidence]);
-
-  const accused = useMemo(
-    () => nodes.filter((n) => n.type === "PERSON").sort((a, b) => (b.riskScore || 0) - (a.riskScore || 0)).slice(0, 24),
-    [nodes]
-  );
-
-  const buildJudicialHtml = () => {
-    const suspects = accused
-      .map(
-        (s, i) => `<tr>
-          <td>${i + 1}</td><td><strong>${esc(s.label)}</strong><br/><span class="muted">Aliases: ${esc((s.aliases || []).join(", ") || "—")}</span></td>
-          <td>${esc(s.role || s.type)}</td><td>${s.riskScore ?? "—"}</td>
-          <td>${esc(s.details?.notes || s.details?.status || "Under investigation")}</td>
-        </tr>`
-      )
-      .join("");
-    const exhibits = (liveEvidence.length > 0 ? liveEvidence : (currentCase.evidenceFiles || []) as any[])
-      .map(
-        (e: any, i: number) => `<tr>
-          <td>Ex-${i + 1}</td><td><strong>${esc(e.fileName || e.file_name)}</strong></td>
-          <td>${esc(e.fileType || e.file_type || "—")}</td>
-          <td class="mono">${esc(String(e.fileHash || e.file_hash || "—")).slice(0, 20)}…</td>
-          <td>${esc(e.sourceAuthority || e.source_authority || "Case vault")}</td>
-          <td>${esc(e.lifecycleStatus || e.status || e.processingStatus || "—")}</td>
-        </tr>`
-      )
-      .join("");
-    const chrono = chronology.map((c) => `<tr><td class="mono">${esc(c.date)}</td><td>${esc(c.event)}</td></tr>`).join("");
-    const statutes = (Object.entries(statuteGroups) as Array<[string, string[]]>)
-      .filter(([, v]) => v.length > 0)
-      .map(([k, v]) => `<h3>${esc(k)}</h3><ul>${v.map((s) => `<li>${esc(s)}</li>`).join("")}</ul>`)
-      .join("");
-
-    return `<!DOCTYPE html>
-<html>
-<head>
-  <title>Judicial Dossier - ${esc(regNumber)} (${esc(currentCase.codeName)})</title>
-  <style>
-    @page { size: A4; margin: 25mm;
-      @top-center { content: "${esc(regNumber)} · ${esc(currentCase.codeName)}"; font-family: 'Times New Roman', Times, serif; font-size: 8pt; color: #6b7280; }
-      @bottom-center { content: "Page " counter(page) " of " counter(pages); font-family: 'Times New Roman', Times, serif; font-size: 8.5pt; color: #374151; }
-    }
-    body { font-family: 'Times New Roman', Times, serif; color: #111; background: #fff; line-height: 1.55; font-size: 12pt; margin: 0; padding: 0 4mm; }
-    .court { text-align: center; border-bottom: 3px double #000; padding-bottom: 10px; margin-bottom: 14px; }
-    .court h1 { font-size: 17pt; margin: 6px 0 2px 0; letter-spacing: 0.5px; }
-    .court .sub { font-size: 10pt; color: #333; }
-    .seal { width: 72px; height: 72px; margin: 0 auto 4px auto; display: block; }
-    .regbox { border: 1px solid #000; padding: 8px 12px; margin: 12px 0; font-size: 10.5pt; }
-    .regbox table { width: 100%; border: none; }
-    .regbox td { border: none; padding: 2px 6px; vertical-align: top; }
-    h2 { font-size: 13pt; text-transform: uppercase; letter-spacing: 0.6px; border-bottom: 1px solid #000; padding-bottom: 3px; margin: 20px 0 8px 0; }
-    h3 { font-size: 11.5pt; margin: 10px 0 4px 0; }
-    table.ev { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
-    table.ev th, table.ev td { border: 1px solid #444; padding: 4px 6px; text-align: left; }
-    table.ev th { background: #eee; }
-    .mono { font-family: 'Courier New', monospace; font-size: 8.5pt; }
-    .muted { color: #555; font-size: 9pt; }
-    tr, .avoid { page-break-inside: avoid; }
-    .attest { margin-top: 26px; display: flex; justify-content: space-between; }
-    .attest .sig { width: 44%; }
-    .attest .line { border-bottom: 1px solid #000; height: 44px; margin-bottom: 4px; }
-    .cert { margin-top: 14px; border: 1px solid #000; padding: 8px 10px; font-size: 9.5pt; }
-  </style>
-</head>
-<body>
-  <div class="court">
-    <img class="seal" src="${sealUrl}" alt="Department seal" />
-    <h1>IN THE COURT OF ${esc(courtName).toUpperCase()}</h1>
-    <div class="sub">${esc(dept.fullName)} &middot; ${esc(venue)} &middot; Jurisdiction: ${esc(jurisdiction)}</div>
-  </div>
-  <div class="regbox">
-    <table>
-      <tr><td><strong>Case Title:</strong></td><td>${esc(currentCase.name)}</td><td><strong>Registration No.:</strong></td><td><strong>${esc(regNumber)}</strong></td></tr>
-      <tr><td><strong>Code Name:</strong></td><td>${esc(currentCase.codeName)}</td><td><strong>Date:</strong></td><td>${esc(filingDate)}</td></tr>
-      <tr><td><strong>Lead Agency:</strong></td><td>${esc(currentCase.leadAgency || dept.fullName)}</td><td><strong>Venue:</strong></td><td>${esc(venue)}</td></tr>
-    </table>
-  </div>
-
-  <h2>I. Case Facts</h2>
-  <p>${esc(displayDossier.executiveSummary || currentCase.description)}</p>
-
-  <h2>II. Accused / Suspect Profiles (${accused.length})</h2>
-  <table class="ev"><thead><tr><th>#</th><th>Name</th><th>Role</th><th>Risk</th><th>Alleged Acts / Status</th></tr></thead>
-  <tbody>${suspects || '<tr><td colspan="5">No person entities on record.</td></tr>'}</tbody></table>
-
-  <h2>III. Exhibits &amp; Evidence Matrix (with Provenance)</h2>
-  <table class="ev"><thead><tr><th>ID</th><th>Exhibit</th><th>Type</th><th>SHA-256</th><th>Source Provenance</th><th>Status</th></tr></thead>
-  <tbody>${exhibits || '<tr><td colspan="6">No exhibits on record.</td></tr>'}</tbody></table>
-
-  <h2>IV. Chronological Findings</h2>
-  <table class="ev"><thead><tr><th style="width:110px">Date</th><th>Finding</th></tr></thead>
-  <tbody>${chrono || '<tr><td colspan="2">No dated findings on record.</td></tr>'}</tbody></table>
-
-  <h2>V. Statutory Citations</h2>
-  ${statutes}
-
-  <h2>VI. Investigating Officer Attestation</h2>
-  <p>I, <strong>${esc(ioName)}</strong>, ${esc(ioRank)} (${esc(ioBadge)}), do hereby attest that the facts, exhibits and findings recorded above were collected and verified in the course of investigation of case <strong>${esc(regNumber)}</strong>, and are true to the best of my knowledge and belief. Place: ${esc(venue)} &nbsp; Date: ${esc(filingDate)}.</p>
-  <div class="attest">
-    <div class="sig"><div class="line"></div><strong>${esc(ioName)}</strong><br/><span class="muted">${esc(ioRank)} · ${esc(ioBadge)}</span><br/><span class="muted">Investigating Officer</span></div>
-    <div class="sig"><div class="line"></div><strong>Countersigned</strong><br/><span class="muted">Supervisory Officer · Seal</span></div>
-  </div>
-  <div class="cert">Certified under Section 65B of the Indian Evidence Act / Section 63 of the Bharatiya Sakshya Adhiniyam (BSA): electronic records annexed hereto carry SHA-256 integrity hashes recorded in the evidence matrix above.</div>
-  ${signatures.length > 0 ? `<h2>VII. Prior Signatures on Record</h2><table class="ev"><thead><tr><th>Officer</th><th>Role / Badge</th><th>Signed At</th><th>Signature Hash</th></tr></thead><tbody>${signatures.map((s: any) => `<tr><td><strong>${esc(s.signed_by)}</strong></td><td>${esc(s.signed_role)} · ${esc(s.signed_badge)}</td><td class="mono">${esc(String(s.signed_at).slice(0, 16).replace("T", " "))}</td><td class="mono">${esc(String(s.signature_hash)).slice(0, 28)}…</td></tr>`).join("")}</tbody></table>` : ""}
-
-  <script>window.onload = function() { setTimeout(function() { window.print(); }, 300); };</script>
-</body>
-</html>`;
-  };
-
-  const openPrintWindow = (html: string) => {
-    try {
-      const printWindow = window.open("", "_blank");
-      if (printWindow) {
-        printWindow.document.open();
-        printWindow.document.write(html);
-        printWindow.document.close();
-      } else {
-        const iframe = document.createElement("iframe");
-        iframe.style.position = "fixed";
-        iframe.style.right = "0";
-        iframe.style.bottom = "0";
-        iframe.style.width = "0";
-        iframe.style.height = "0";
-        iframe.style.border = "0";
-        document.body.appendChild(iframe);
-        const doc = iframe.contentWindow?.document || iframe.contentDocument;
-        if (doc) {
-          doc.open();
-          doc.write(html);
-          doc.close();
-          setTimeout(() => {
-            iframe.contentWindow?.focus();
-            iframe.contentWindow?.print();
-            setTimeout(() => {
-              document.body.removeChild(iframe);
-            }, 2000);
-          }, 400);
-        } else {
-          window.print();
-        }
-      }
-    } catch (e) {
-      console.warn("Popup print failed, falling back to window.print()", e);
-      window.print();
-    }
-  };
-
-  const handlePrint = () => openPrintWindow(buildJudicialHtml());
-
-  // Legacy intel-format print retained for reference (superseded by the judicial dossier below).
-  const handlePrintIntel = () => {
-    try {
-      const printWindow = window.open("", "_blank");
-      const officerDecisionsHtml = (displayDossier.officerDecisions || []).length > 0 ? `
-      <h2>5. Officer Confirmation Decisions & Evidence Review Ledger</h2>
-      ${displayDossier.officerDecisions!.map((decision, idx) => `
-        <div class="officer-decision-card" style="border: 1px solid #d1d5db; border-radius: 4px; padding: 10px; margin-bottom: 10px; page-break-inside: avoid;">
-          <div class="decision-header" style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <strong>${decision.officerName}</strong>
-              <span style="font-size: 10px; color: #6b7280; font-family: monospace;">${decision.officerRank}</span>
-              <span style="font-size: 9px; font-weight: bold; padding: 2px 6px; border-radius: 3px; background: ${decision.targetType === "NODE" ? "#dcfce7" : "#dbeafe"}; color: ${decision.targetType === "NODE" ? "#166534" : "#1e40af"};">${decision.targetType}</span>
-            </div>
-            <span style="font-size: 10px; color: #6b7280; font-family: monospace;">${new Date(decision.timestamp).toLocaleString()}</span>
-          </div>
-          <div style="display: flex; align-items: center; gap: 8px; font-size: 11px; font-family: monospace; margin-bottom: 6px;">
-            <span style="color: #4b5563;">Target:</span>
-            <span style="font-weight: bold; color: #1f2937;">${decision.targetLabel}</span>
-            <span style="color: #9ca3af;">→</span>
-            <span style="font-weight: bold; padding: 2px 6px; border-radius: 3px; background: ${decision.newState === "CONFIRMED" ? "#dcfce7" : decision.newState === "REJECTED" ? "#fee2e2" : decision.newState === "UNCERTAIN" ? "#f3e8ff" : "#fef3c7"}; color: ${decision.newState === "CONFIRMED" ? "#166534" : decision.newState === "REJECTED" ? "#991b1b" : decision.newState === "UNCERTAIN" ? "#6b21a8" : "#92400e"};">
-              ${decision.previousState} → ${decision.newState}
-            </span>
-          </div>
-          ${decision.note ? `<div style="font-size: 10px; color: #374151; font-style: italic; background: #f9fafb; padding: 6px; border-radius: 3px; border: 1px solid #e5e7eb;"><strong>Officer Note:</strong> ${decision.note}</div>` : ""}
-          <div style="font-size: 9px; color: #6b7280; font-family: monospace;">SHA-256: ${decision.digitalHash?.slice(0, 48)}...</div>
-        </div>
-      `).join("")}
-    ` : "";
-
-    const digitalSignaturesHtml = (displayDossier.digitalSignatures || []).length > 0 ? `
-      <h2>6. Digital Signatures & Cryptographic Verification (Section 65B/BSA)</h2>
-      <div style="margin-bottom: 10px;">
-        ${displayDossier.digitalSignatures!.map((sig, idx) => `
-          <div class="signature-card" style="border: 1px solid #d1d5db; border-radius: 4px; padding: 10px; margin-bottom: 8px; page-break-inside: avoid;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-              <div style="display: flex; align-items: center; gap: 8px;">
-                <div style="width: 20px; height: 20px; background: #dcfce7; border: 1px solid #86efac; border-radius: 3px; display: flex; align-items: center; justify-content: center;">✓</div>
-                <div>
-                  <div style="font-weight: bold; font-size: 12px;">${sig.officerName}</div>
-                  <div style="font-size: 9px; color: #6b7280; font-family: monospace;">${sig.officerRank}</div>
-                </div>
-              </div>
-              <span style="font-size: 9px; font-weight: bold; color: #166534;">VERIFIED ✓</span>
-            </div>
-            <div style="font-size: 9px; color: #4b5563; font-family: monospace; margin-bottom: 2px;">Action: ${sig.action}</div>
-            <div style="font-size: 9px; color: #4b5563; font-family: monospace; margin-bottom: 2px;">Target: ${sig.targetType}: ${sig.targetLabel}</div>
-            <div style="font-size: 9px; color: #4b5563; font-family: monospace; margin-bottom: 2px;">Timestamp: ${new Date(sig.timestamp).toISOString()}</div>
-            <div style="font-size: 9px; color: #6b7280; font-family: monospace;">SHA-256: ${sig.digitalHash?.slice(0, 48)}...</div>
-          </div>
-        `).join("")}
-      </div>
-      <div style="background: #dcfce7; border: 1px solid #86efac; border-radius: 4px; padding: 8px; font-size: 9px; color: #166534; font-family: monospace; text-align: center;">
-        All signatures verified. Chain of custody cryptographically sealed per Section 65B Indian Evidence Act / BSA.
-      </div>
-    ` : "";
-
-    const playbookHtml = (displayDossier.playbook || []).length > 0 ? `
-      <h2>7. Investigative Playbook Annexure (Prioritized Legal Directives)</h2>
-      <div style="margin-bottom: 10px;">
-        ${displayDossier.playbook!.map((step, idx) => `
-          <div style="border: 1px solid #d1d5db; border-radius: 4px; padding: 10px; margin-bottom: 8px; page-break-inside: avoid;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-              <div style="font-weight: bold; font-size: 12px;">${idx + 1}. ${step.title}</div>
-              <span style="font-size: 9px; font-weight: bold; padding: 2px 6px; border-radius: 3px; background: ${step.priority === "IMMEDIATE" ? "#fee2e2" : step.priority === "HIGH" ? "#fef3c7" : "#f3f4f6"}; color: ${step.priority === "IMMEDIATE" ? "#991b1b" : step.priority === "HIGH" ? "#92400e" : "#374151"};">${step.priority}${step.completed ? " • DONE" : ""}</span>
-            </div>
-            <div style="font-size: 11px; color: #374151; margin-bottom: 4px;">${step.description}</div>
-            <div style="font-size: 10px; color: #1f2937; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 3px; padding: 6px; margin-bottom: 4px;"><strong>Legal Basis:</strong> ${step.statute} — ${step.provision} (Authority: ${step.authority})</div>
-            <div style="font-size: 10px; color: #4b5563;">Responsible: ${step.responsibleRole} • Deadline: +${step.deadlineDays} day(s)</div>
-            <div style="font-size: 10px; color: #4b5563;">Evidence: ${(step.evidenceToCollect || []).join("; ")}</div>
-            <div style="font-size: 10px; color: #065f46;"><strong>Expected:</strong> ${step.expectedOutcome}</div>
-            ${step.completed ? `<div style="font-size: 10px; color: #065f46;">Completed by ${step.completedBy || "officer"} on ${step.completedAt ? new Date(step.completedAt).toLocaleString() : ""}</div>` : ""}
-          </div>
-        `).join("")}
-      </div>
-    ` : "";
-
-      const printableContent = `
+  // Finalize and print
+  const handlePrint = () => {
+    if (!generatedText) return;
+    const printWindow = window.open("", "_blank");
+    if (printWindow) {
+      printWindow.document.write(`
 <!DOCTYPE html>
 <html>
 <head>
-  <title>COURT DOSSIER - ${displayDossier.caseTitle} (${displayDossier.caseNumber})</title>
+  <title>Arrest Warrant / Chargesheet - ${currentCase.codeName}</title>
   <style>
-    @page { size: A4; margin: 20mm; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      color: #111827;
-      background: #ffffff;
-      line-height: 1.5;
-      font-size: 13px;
-      margin: 0;
-      padding: 20px;
-    }
-    .header {
-      text-align: center;
-      border-bottom: 2px solid #000;
-      padding-bottom: 12px;
-      margin-bottom: 20px;
-    }
-    .classification {
-      display: inline-block;
-      border: 2px solid #dc2626;
-      color: #dc2626;
-      font-weight: 800;
-      font-size: 11px;
-      padding: 3px 10px;
-      letter-spacing: 1px;
-      margin-bottom: 8px;
-    }
-    .agency-title {
-      font-size: 11px;
-      font-weight: bold;
-      color: #4b5563;
-      letter-spacing: 1.5px;
-      text-transform: uppercase;
-    }
-    .case-title {
-      font-size: 20px;
-      font-weight: 900;
-      margin: 6px 0 4px 0;
-      color: #000;
-    }
-    .meta-row {
-      display: flex;
-      justify-content: space-between;
-      font-size: 11px;
-      color: #374151;
-      font-family: monospace;
-      margin-top: 8px;
-    }
-    h2 {
-      font-size: 14px;
-      font-weight: 800;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      border-bottom: 1px solid #d1d5db;
-      padding-bottom: 4px;
-      margin-top: 24px;
-      margin-bottom: 10px;
-      color: #1f2937;
-    }
-    .summary-box {
-      background-color: #f9fafb;
-      border: 1px solid #e5e7eb;
-      padding: 12px;
-      border-radius: 4px;
-      font-size: 12px;
-    }
-    .suspect-card {
-      border: 1px solid #d1d5db;
-      border-radius: 4px;
-      padding: 10px;
-      margin-bottom: 10px;
-      page-break-inside: avoid;
-    }
-    .suspect-header {
-      display: flex;
-      justify-content: space-between;
-      font-weight: bold;
-      font-size: 13px;
-    }
-    .risk-badge {
-      background: #fee2e2;
-      color: #991b1b;
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-size: 10px;
-      font-family: monospace;
-    }
-    .pattern-card {
-      border-left: 3px solid #dc2626;
-      background: #fef2f2;
-      padding: 8px 12px;
-      margin-bottom: 8px;
-      page-break-inside: avoid;
-    }
-    .pattern-title {
-      font-weight: bold;
-      color: #991b1b;
-      font-size: 12px;
-    }
-    .lead-box {
-      background: #fffbeb;
-      border: 1px solid #fef3c7;
-      padding: 6px 10px;
-      margin-top: 4px;
-      font-size: 11px;
-      color: #92400e;
-    }
-    ol {
-      padding-left: 20px;
-      margin: 8px 0;
-    }
-    li {
-      margin-bottom: 6px;
-    }
-    .signatures {
-      margin-top: 40px;
-      padding-top: 20px;
-      border-top: 1px solid #9ca3af;
-      display: flex;
-      justify-content: space-between;
-      page-break-inside: avoid;
-    }
-    .sig-block {
-      text-align: center;
-      width: 200px;
-    }
-    .sig-line {
-      border-bottom: 1px dashed #4b5563;
-      height: 40px;
-      margin-bottom: 6px;
-    }
-    .footer-note {
-      margin-top: 30px;
-      text-align: center;
-      font-size: 10px;
-      color: #6b7280;
-    }
+    @page { size: A4; margin: 25mm; @bottom-center { content: "Page " counter(page); font-family: 'Times New Roman', serif; font-size: 9pt; } }
+    body { font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 1.6; color: #111; margin: 0; padding: 0 4mm; }
+    .court { text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 20px; }
+    .court h1 { font-size: 16pt; margin: 4px 0; }
+    .court .sub { font-size: 10pt; color: #333; }
+    h2 { font-size: 13pt; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #000; padding-bottom: 3px; margin: 24px 0 10px; }
+    p { text-align: justify; margin: 8px 0; }
+    .sig-block { margin-top: 40px; }
+    .sig-line { border-bottom: 1px solid #000; width: 300px; margin-bottom: 4px; }
+    .indent { text-indent: 2em; }
   </style>
 </head>
-<body>
-  <div class="header">
-    <div class="classification">${displayDossier.classification}</div>
-    <div class="agency-title">CENTRAL INTELLIGENCE & LAW ENFORCEMENT &bull; GRAPH INTELLIGENCE DIVISION</div>
-    <div class="case-title">${displayDossier.caseTitle}</div>
-    <div class="meta-row">
-      <span><strong>CASE ID:</strong> ${displayDossier.caseNumber}</span>
-      <span><strong>GENERATED:</strong> ${new Date(displayDossier.generatedAt).toLocaleString()}</span>
-      <span><strong>STATUTE:</strong> SEC 65B EVIDENCE CERTIFIED</span>
-    </div>
-  </div>
-
-  <h2>1. Executive Case Summary</h2>
-  <div class="summary-box">
-    ${displayDossier.executiveSummary}
-  </div>
-
-  <h2>2. Primary Suspect Profiles & Graph Centrality</h2>
-  ${displayDossier.keySuspects
-    .map(
-      (s) => `
-    <div class="suspect-card">
-      <div class="suspect-header">
-        <span>${s.name} (${s.role})</span>
-        <span class="risk-badge">RISK: ${s.riskScore}/100</span>
-      </div>
-      <div style="font-size: 11px; color: #4b5563; margin-top: 2px;">
-        <strong>Aliases:</strong> ${s.knownAliases.join(", ") || "None recorded"} &bull; <strong>Centrality:</strong> ${s.centralityMetric}
-      </div>
-      <div style="margin-top: 6px; font-size: 12px; color: #1f2937;">
-        ${s.allegedActs}
-      </div>
-    </div>
-  `
-    )
-    .join("")}
-
-  <h2>3. Suspicious Algorithmic Inferences & Money Mule Evidence</h2>
-  ${displayDossier.suspiciousPatternsDetected
-    .map(
-      (p) => `
-    <div class="pattern-card">
-      <div class="pattern-title">[${p.severity}] ${p.patternTitle}</div>
-      <div style="font-size: 11px; color: #374151; margin-top: 2px;">${p.evidenceSummary}</div>
-      <div class="lead-box"><strong>Actionable Lead:</strong> ${p.actionableLead}</div>
-    </div>
-  `
-    )
-    .join("")}
-
-  <h2>4. Actionable Prosecution Directives & Court Requests</h2>
-  <ol>
-    ${displayDossier.actionableNextSteps.map((step) => `<li>${step}</li>`).join("")}
-  </ol>
-
-  ${officerDecisionsHtml}
-
-  ${digitalSignaturesHtml}
-
-  ${playbookHtml}
-
-  <div class="signatures">
-    <div class="sig-block">
-      <div class="sig-line"></div>
-      <div style="font-weight: bold; font-size: 11px;">Lead Investigating Officer</div>
-      <div style="font-size: 10px; color: #6b7280;">Special Crime Investigation Branch</div>
-    </div>
-    <div class="sig-block">
-      <div class="sig-line"></div>
-      <div style="font-weight: bold; font-size: 11px;">Digital Forensic Examiner</div>
-      <div style="font-size: 10px; color: #6b7280;">Cyber Forensics & Hash Verification</div>
-    </div>
-    <div class="sig-block">
-      <div class="sig-line"></div>
-      <div style="font-weight: bold; font-size: 11px;">Public Prosecutor / Special Court</div>
-      <div style="font-size: 10px; color: #6b7280;">Judicial Presentation & Filing</div>
-    </div>
-  </div>
-
-  <div class="footer-note">
-    Document generated electronically by AI Crime Network Analysis Platform. Certified under Section 65B Indian Evidence Act / Section 63 Bharatiya Sakshya Adhiniyam (BSA).
-  </div>
-
-  <script>
-    window.onload = function() {
-      setTimeout(function() {
-        window.print();
-      }, 300);
-    };
-  </script>
-</body>
-</html>
-      `;
-
-      if (printWindow) {
-        printWindow.document.open();
-        printWindow.document.write(printableContent);
-        printWindow.document.close();
-      } else {
-        // Fallback for popup-blocked environments: inject iframe
-        const iframe = document.createElement("iframe");
-        iframe.style.position = "fixed";
-        iframe.style.right = "0";
-        iframe.style.bottom = "0";
-        iframe.style.width = "0";
-        iframe.style.height = "0";
-        iframe.style.border = "0";
-        document.body.appendChild(iframe);
-        const doc = iframe.contentWindow?.document || iframe.contentDocument;
-        if (doc) {
-          doc.open();
-          doc.write(printableContent);
-          doc.close();
-          setTimeout(() => {
-            iframe.contentWindow?.focus();
-            iframe.contentWindow?.print();
-            setTimeout(() => {
-              document.body.removeChild(iframe);
-            }, 2000);
-          }, 400);
-        } else {
-          window.print();
-        }
-      }
-    } catch (e) {
-      console.warn("Popup print failed, falling back to window.print()", e);
-      window.print();
+<body>${generatedText.replace(/\n/g, "<br>")}<script>window.onload=()=>setTimeout(()=>window.print(),300);</script></body></html>
+`);
+      printWindow.document.close();
     }
   };
 
-  const handleCopyMarkdown = () => {
-    const md = `
-# CONFIDENTIAL // LAW ENFORCEMENT INTELLIGENCE DOSSIER
-**CASE REF:** ${displayDossier.caseTitle} (${displayDossier.caseNumber})
-**DATE:** ${new Date(displayDossier.generatedAt).toLocaleString()}
-**CLASSIFICATION:** ${displayDossier.classification}
-
----
-
-## 1. EXECUTIVE SUMMARY
-${displayDossier.executiveSummary}
-
-## 2. KEY SUSPECTS & HIERARCHICAL PROFILES
-${displayDossier.keySuspects
-  .map(
-    (s) =>
-      `### ${s.name} (${s.role}) - Risk: ${s.riskScore}/100\n- **Metrics:** ${s.centralityMetric}\n- **Aliases:** ${s.knownAliases.join(", ") || "None"}\n- **Allegations:** ${s.allegedActs}`
-  )
-  .join("\n\n")}
-
-## 3. SUSPICIOUS PATTERN EVIDENCE
-${displayDossier.suspiciousPatternsDetected
-  .map((p) => `- **[${p.severity}] ${p.patternTitle}:** ${p.evidenceSummary}\n  *Lead:* ${p.actionableLead}`)
-  .join("\n\n")}
-
-## 4. ACTIONABLE PROSECUTION & TACTICAL STEPS
-${displayDossier.actionableNextSteps.map((step, idx) => `${idx + 1}. ${step}`).join("\n")}
-    `.trim();
-
-    navigator.clipboard.writeText(md);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = () => {
+    if (generatedText) navigator.clipboard.writeText(generatedText);
   };
 
-  const handleDownloadJSON = () => {
-    const blob = new Blob([JSON.stringify(displayDossier, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `DOSSIER_${currentCase.codeName}_${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+  if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 overflow-y-auto animate-in fade-in duration-200">
-      <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
-        {/* Modal Top Header */}
-        <div className="p-4 sm:p-5 border-b border-slate-800 bg-slate-950 flex items-center justify-between">
+    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto" role="dialog" aria-modal="true">
+      <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="p-4 border-b border-slate-700 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-amber-500/10 rounded-xl text-amber-400 border border-amber-500/20">
-              <FileText className="w-6 h-6" />
-            </div>
+            <div className="p-2 bg-amber-500/20 rounded-lg text-amber-400"><Gavel className="w-5 h-5" /></div>
             <div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
-                  {displayDossier.classification}
-                </span>
-              </div>
-              <h2 className="text-sm sm:text-base font-bold text-slate-100 mt-1">
-                Court-Ready Intelligence Dossier & Chargesheet Annexure
-              </h2>
+              <h2 className="text-lg font-bold text-slate-100">Arrest Warrant / Chargesheet Wizard</h2>
+              <p className="text-xs text-slate-400">Step {step === "select" ? 1 : step === "sections" ? 2 : step === "review" ? 3 : 4} of 4</p>
             </div>
           </div>
+          <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-slate-200 rounded-lg hover:bg-slate-800"><X className="w-5 h-5" /></button>
+        </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleGenerateDossier}
-              disabled={isGenerating}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors shadow"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>{isGenerating ? "Synthesizing with AI..." : "Re-Synthesize via Gemini"}</span>
-            </button>
-
-            <button
-              onClick={onClose}
-              className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-lg transition-colors"
-            >
-              <X className="w-5 h-5" />
-            </button>
+        {/* Progress */}
+        <div className="px-4 pb-2 border-b border-slate-700">
+          <div className="flex gap-2">
+            {["select", "sections", "review", "final"].map((s, i) => (
+              <div key={s} className="flex-1 flex items-center gap-1.5">
+                <div className={`flex-1 h-1.5 rounded ${step === s || ["select", "sections", "review", "final"].indexOf(step) > i ? "bg-amber-500" : "bg-slate-700"}`} />
+                <span className="text-[10px] text-slate-400 capitalize hidden sm:block">{s}</span>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Dossier Document Content Area */}
-        <div className="flex-1 overflow-y-auto p-6 sm:p-8 bg-slate-950/60 font-sans space-y-6 print:bg-white print:text-black">
-          {/* Judicial filing particulars (Req33 header block) */}
-          <div className="p-4 bg-slate-900 border border-amber-500/30 rounded-xl space-y-3">
-            <div className="text-[11px] font-bold text-amber-300 uppercase tracking-wider">
-              Judicial Filing Particulars — printed on the court dossier
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              <label className="block">
-                <span className="text-[10px] font-semibold text-slate-400">Court</span>
-                <input value={courtName} onChange={(e) => setCourtName(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
-              </label>
-              <label className="block">
-                <span className="text-[10px] font-semibold text-slate-400">Registration No.</span>
-                <input value={regNumber} onChange={(e) => setRegNumber(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 font-mono" />
-              </label>
-              <label className="block">
-                <span className="text-[10px] font-semibold text-slate-400">Date</span>
-                <input type="date" value={filingDate} onChange={(e) => setFilingDate(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
-              </label>
-              <label className="block">
-                <span className="text-[10px] font-semibold text-slate-400">Venue</span>
-                <input value={venue} onChange={(e) => setVenue(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
-              </label>
-              <label className="block sm:col-span-2">
-                <span className="text-[10px] font-semibold text-slate-400">Jurisdiction</span>
-                <input value={jurisdiction} onChange={(e) => setJurisdiction(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
-              </label>
-              <label className="block">
-                <span className="text-[10px] font-semibold text-slate-400">IO Name</span>
-                <input value={ioName} onChange={(e) => setIoName(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
-              </label>
-              <label className="block">
-                <span className="text-[10px] font-semibold text-slate-400">IO Rank</span>
-                <input value={ioRank} onChange={(e) => setIoRank(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100" />
-              </label>
-              <label className="block">
-                <span className="text-[10px] font-semibold text-slate-400">IO Badge</span>
-                <input value={ioBadge} onChange={(e) => setIoBadge(e.target.value)} className="mt-0.5 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 font-mono" />
-              </label>
-            </div>
-            <p className="text-[10px] font-mono text-slate-500">
-              Seal: {dept.fullName} · {liveEvidence.length} live exhibits · {liveMembers.length} team members · {accused.length} accused profiles
-            </p>
-            {signMsg && (
-              <div className={`p-2.5 rounded-xl text-[11px] border ${signMsg.ok ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-rose-500/10 border-rose-500/30 text-rose-300"}`}>
-                {signMsg.text}
-              </div>
-            )}
-            {signatures.length > 0 && (
-              <div className="space-y-1.5">
-                {signatures.map((s: any) => (
-                  <div key={s._id} className="flex items-center justify-between gap-2 rounded-lg bg-emerald-500/5 border border-emerald-500/25 px-2.5 py-1.5 text-[11px]">
-                    <span className="text-emerald-200 font-semibold truncate">
-                      ✓ {s.signed_by} ({s.signed_role}) · {new Date(s.signed_at).toLocaleString()}
-                    </span>
-                    <span className="font-mono text-[10px] text-emerald-300/80 shrink-0">{String(s.signature_hash).slice(0, 20)}…</span>
-                  </div>
-                ))}
-              </div>
-            )}
+        {error && (
+          <div className="m-4 p-3 bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs rounded-lg flex items-center gap-2">
+            <AlertCircle className="w-4 h-4" /> {error}
           </div>
-          {/* Document Masthead */}
-          <div className="border-b-2 border-slate-700 pb-4 text-center">
-            <div className="text-[11px] font-mono uppercase tracking-widest text-amber-400 font-bold mb-1">
-              CENTRAL INTELLIGENCE & LAW ENFORCEMENT GRAPH INTELLIGENCE DIVISION
-            </div>
-            <h1 className="text-xl sm:text-2xl font-black text-slate-100 tracking-tight">
-              {displayDossier.caseTitle}
-            </h1>
-            <div className="flex items-center justify-center gap-4 text-xs text-slate-400 mt-2 font-mono">
-              <span>CASE ID: {displayDossier.caseNumber}</span>
-              <span>•</span>
-              <span>GENERATED: {new Date(displayDossier.generatedAt).toLocaleDateString()}</span>
-              <span>•</span>
-              <span className="text-rose-400 font-bold">SEC 65B EVIDENCE CERTIFIED</span>
-            </div>
-          </div>
+        )}
 
-          {/* 1. Executive Summary */}
-          <div>
-            <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-2">
-              1. Executive Case Summary
-            </h3>
-            <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl text-xs text-slate-200 leading-relaxed">
-              {displayDossier.executiveSummary}
-            </div>
-          </div>
-
-          {/* 2. Key Suspects & Kingpin Hierarchy */}
-          <div>
-            <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-2">
-              2. Primary Suspect Profiles & Graph Centrality
-            </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {displayDossier.keySuspects.map((s) => (
-                <div
-                  key={s.id}
-                  className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-2 text-xs"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-100 text-sm flex items-center gap-1.5">
-                      <Crown className="w-4 h-4 text-amber-400" />
-                      {s.name}
-                    </span>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300">
-                      RISK: {s.riskScore}/100
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-slate-400 block">{s.role}</span>
-                  <div className="text-[11px] font-mono text-slate-400 bg-slate-950 p-2 rounded border border-slate-800/80">
-                    {s.centralityMetric}
-                  </div>
-                  <p className="text-[11px] text-slate-300">{s.allegedActs}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* 3. Suspicious Algorithmic Patterns */}
-          <div>
-            <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-2">
-              3. Automated Pattern Inferences & Money Trail Evidence
-            </h3>
-            <div className="space-y-3">
-              {displayDossier.suspiciousPatternsDetected.map((p, idx) => (
-                <div
-                  key={idx}
-                  className="p-3.5 bg-slate-900 border border-slate-800 rounded-xl text-xs space-y-1.5"
-                >
-                  <div className="flex items-center justify-between">
-                    <strong className="text-slate-100 font-bold flex items-center gap-1.5">
-                      <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-                      {p.patternTitle}
-                    </strong>
-                    <span className="text-[10px] font-mono font-bold text-rose-400">
-                      [{p.severity}]
-                    </span>
-                  </div>
-                  <p className="text-slate-300 text-[11px] leading-relaxed">{p.evidenceSummary}</p>
-                  <p className="text-[11px] text-amber-300 bg-amber-500/10 p-2 rounded border border-amber-500/20 font-medium">
-                    <strong>Tactical Action:</strong> {p.actionableLead}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* 4. Actionable Next Steps */}
-          <div>
-            <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-2">
-              4. Immediate Tactical & Legal Directives
-            </h3>
-            <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl text-xs space-y-2">
-              {displayDossier.actionableNextSteps.map((step, idx) => (
-                <div key={idx} className="flex items-start gap-2 text-slate-200">
-                  <span className="text-amber-400 font-bold font-mono">{idx + 1}.</span>
-                  <span>{step}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* 5. Officer Confirmation Decisions & Review Ledger */}
-          {(displayDossier.officerDecisions && displayDossier.officerDecisions.length > 0) && (
-            <div>
-              <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-2 flex items-center gap-2">
-                <ClipboardCheck className="w-3.5 h-3.5" />
-                5. Officer Confirmation Decisions & Evidence Review Ledger
-              </h3>
-              <div className="space-y-2">
-                {displayDossier.officerDecisions.map((decision, idx) => (
-                  <div
-                    key={idx}
-                    className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1.5 text-xs"
-                  >
-                    <div className="flex items-center justify-between flex-wrap gap-2">
-                      <div className="flex items-center gap-2">
-                        <User className="w-3.5 h-3.5 text-cyan-400" />
-                        <span className="font-bold text-slate-100">{decision.officerName}</span>
-                        <span className="text-[9px] font-mono text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded">{decision.officerRank}</span>
-                        {decision.targetType === "NODE" && (
-                          <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">NODE</span>
-                        )}
-                        {decision.targetType === "LINK" && (
-                          <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">LINK</span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-1.5 text-right">
-                        <span className="text-[9px] font-mono text-slate-400">{new Date(decision.timestamp).toLocaleString()}</span>
-                        <Hash className="w-3.5 h-3.5 text-amber-400" />
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
-                      <span className="text-slate-400">Target:</span>
-                      <span className="font-semibold text-amber-300">{decision.targetLabel}</span>
-                      <span className="text-slate-500">→</span>
-                      <span
-                        className={`font-bold px-2 py-0.5 rounded ${
-                          decision.newState === "CONFIRMED"
-                            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                            : decision.newState === "REJECTED"
-                            ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                            : decision.newState === "UNCERTAIN"
-                            ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
-                            : "bg-amber-500/20 text-amber-300 border border-amber-500/30"
-                        }`}
-                      >
-                        {decision.previousState} → {decision.newState}
-                      </span>
-                    </div>
-                    {decision.note && (
-                      <div className="text-[10px] text-slate-300 italic bg-slate-950 p-2 rounded border border-slate-800/80">
-                        <strong>Officer Note:</strong> {decision.note}
-                      </div>
-                    )}
-                    <div className="text-[9px] font-mono text-slate-500 flex items-center gap-1">
-                      <Hash className="w-3 h-3" />
-                      <span>Digital Hash: {decision.digitalHash?.slice(0, 32)}...</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* 6. Digital Signatures & Cryptographic Verification */}
-          {(displayDossier.digitalSignatures && displayDossier.digitalSignatures.length > 0) && (
-            <div>
-              <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-2 flex items-center gap-2">
-                <FileSignature className="w-3.5 h-3.5" />
-                6. Digital Signatures & SHA-256 Cryptographic Verification (Section 65B/BSA)
-              </h3>
-              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                {displayDossier.digitalSignatures.map((sig, idx) => (
-                  <div
-                    key={idx}
-                    className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1 text-xs"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className="p-1 bg-emerald-500/10 rounded border border-emerald-500/20">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* STEP 1: Select Accused */}
+          {step === "select" && (
+            <div className="space-y-4">
+              <h3 className="text-sm font-bold text-amber-400">Select Accused Persons</h3>
+              <p className="text-xs text-slate-400">Choose confirmed persons from the case graph to include in the warrant.</p>
+              {personNodes.length === 0 ? (
+                <div className="p-6 text-center text-slate-500 text-sm">No confirmed person entities in this case.</div>
+              ) : (
+                <div className="grid gap-2 max-h-80 overflow-y-auto">
+                  {personNodes.map((node) => (
+                    <button
+                      key={node.id}
+                      onClick={() => toggleAccused(node)}
+                      className={`p-3 rounded-lg border text-left transition-colors ${
+                        isAccused(node.id)
+                          ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
+                          : "bg-slate-950 border-slate-700 text-slate-300 hover:border-amber-500/30"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <User className="w-4 h-4 text-amber-400" />
+                          <div>
+                            <div className="font-bold text-sm">{node.label}</div>
+                            <div className="text-[10px] text-slate-400">{node.role || "Accused"}</div>
+                          </div>
                         </div>
-                        <div>
-                          <div className="font-bold text-slate-100">{sig.officerName}</div>
-                          <div className="text-[9px] font-mono text-slate-400">{sig.officerRank}</div>
-                        </div>
+                        {isAccused(node.id) && <span className="text-xs font-mono bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded">SELECTED</span>}
                       </div>
-                      <span className="text-[9px] font-mono text-emerald-400">VERIFIED ✓</span>
-                    </div>
-                    <div className="text-[9px] text-slate-400 font-mono">
-                      <span>Action: </span><span className="text-slate-300">{sig.action}</span>
-                    </div>
-                    <div className="text-[9px] text-slate-400 font-mono">
-                      <span>Target: </span><span className="text-slate-300">{sig.targetType}: {sig.targetLabel}</span>
-                    </div>
-                    <div className="text-[9px] text-slate-400 font-mono">
-                      <span>Timestamp: </span><span className="text-slate-300">{new Date(sig.timestamp).toISOString()}</span>
-                    </div>
-                    <div className="text-[9px] text-slate-500 font-mono">
-                      <span>SHA-256: </span><span>{sig.digitalHash?.slice(0, 48)}...</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-3 p-2 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-[9px] text-emerald-300 font-mono">
-                All signatures verified. Chain of custody cryptographically sealed per Section 65B Indian Evidence Act / BSA.
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="flex justify-end pt-2">
+                <button
+                  onClick={() => setStep("sections")}
+                  disabled={warrant.accused.length === 0}
+                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <ArrowRight className="w-4 h-4" /> Continue
+                </button>
               </div>
             </div>
           )}
 
-          {/* 7. Investigative Playbook Annexure */}
-          {(displayDossier.playbook && displayDossier.playbook.length > 0) && (
-            <div>
-              <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-2 flex items-center gap-2">
-                <ClipboardCheck className="w-3.5 h-3.5" />
-                7. Investigative Playbook Annexure (Prioritized Legal Directives)
-              </h3>
-              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                {displayDossier.playbook.map((step, idx) => (
-                  <div
-                    key={step.id || idx}
-                    className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1.5 text-xs"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-slate-100">{idx + 1}. {step.title}</span>
-                      <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded border shrink-0 ${
-                        step.priority === "IMMEDIATE" ? "bg-rose-500/20 text-rose-300 border-rose-500/40" :
-                        step.priority === "HIGH" ? "bg-amber-500/20 text-amber-300 border-amber-500/40" :
-                        step.priority === "MEDIUM" ? "bg-sky-500/20 text-sky-300 border-sky-500/40" :
-                        "bg-slate-700/40 text-slate-300 border-slate-600"
-                      }`}>
-                        {step.priority}{step.completed ? " • DONE" : ""}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-300">{step.description}</p>
-                    <div className="text-[10px] text-slate-200 bg-slate-950 p-2 rounded border border-slate-800/80">
-                      <strong>Legal Basis:</strong> {step.statute} — {step.provision} <span className="text-slate-400">(Authority: {step.authority})</span>
-                    </div>
-                    <div className="text-[10px] text-slate-400 font-mono">
-                      Responsible: <span className="text-slate-300">{step.responsibleRole}</span> • Deadline: <span className="text-slate-300">+{step.deadlineDays} day(s)</span>
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      Evidence: <span className="text-slate-300">{(step.evidenceToCollect || []).join("; ")}</span>
-                    </div>
-                    <div className="text-[10px] text-emerald-300">
-                      <strong>Expected:</strong> {step.expectedOutcome}
-                    </div>
-                    {step.completed && (
-                      <div className="text-[10px] text-emerald-400">
-                        Completed by {step.completedBy || "officer"}{step.completedAt ? ` on ${new Date(step.completedAt).toLocaleString()}` : ""}
-                      </div>
-                    )}
+          {/* STEP 2: Legal Sections & Allegations */}
+          {step === "sections" && (
+            <div className="space-y-4">
+              <h3 className="text-sm font-bold text-amber-400">Charges & Allegations</h3>
+              <p className="text-xs text-slate-400">For each accused, specify the legal sections and a brief allegation summary.</p>
+              {warrant.accused.map((accused, idx) => (
+                <div key={accused.nodeId} className="bg-slate-950 border border-slate-700 rounded-lg p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <User className="w-4 h-4 text-amber-400" />
+                    <span className="font-bold">{accused.name}</span>
+                    <span className="text-[10px] text-slate-400">{accused.role}</span>
                   </div>
-                ))}
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-[10px] text-slate-400 mb-1">Sections (comma-separated)</label>
+                      <input
+                        value={accused.sections.join(", ")}
+                        onChange={(e) => updateAccused(accused.nodeId, "sections", e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
+                        placeholder="e.g., BNS-103, BNS-111, NDPS-21, PMLA-3"
+                        className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-slate-400 mb-1">Role in Offence</label>
+                      <input
+                        value={accused.role}
+                        onChange={(e) => updateAccused(accused.nodeId, "role", e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Allegations Summary</label>
+                    <textarea
+                      value={accused.allegations}
+                      onChange={(e) => updateAccused(accused.nodeId, "allegations", e.target.value)}
+                      rows={3}
+                      placeholder="Describe the specific acts, evidence, and role of this accused..."
+                      className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Evidence References (exhibit IDs, one per line)</label>
+                    <textarea
+                      value={accused.evidenceRefs.join("\n")}
+                      onChange={(e) => updateAccused(accused.nodeId, "evidenceRefs", e.target.value.split("\n").map((s) => s.trim()).filter(Boolean))}
+                      rows={2}
+                      className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100"
+                    />
+                  </div>
+                </div>
+              ))}
+              <div className="flex justify-between pt-2">
+                <button onClick={() => setStep("select")} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg">Back</button>
+                <button onClick={() => setStep("review")} className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg">Next</button>
               </div>
             </div>
           )}
-        </div>
 
-        {/* Modal Footer Controls */}
-        <div className="p-4 bg-slate-950 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handlePrint}
-              className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold rounded-lg transition-colors"
-              title="Court-admissible judicial dossier: header, seal, reg. no., evidence matrix, statutes, attestation, Page X of Y"
-            >
-              <Printer className="w-4 h-4" />
-              <span>Print Judicial Dossier</span>
-            </button>
+          {/* STEP 3: Additional Points & Court Details */}
+          {step === "review" && (
+            <div className="space-y-4">
+              <h3 className="text-sm font-bold text-amber-400">Additional Points & Court Details</h3>
+              <p className="text-xs text-slate-400">Add any manual points for the warrant. Fill in court and IO details.</p>
+              <div className="bg-slate-950 border border-slate-700 rounded-lg p-4 space-y-3">
+                <label className="block text-[10px] text-slate-400 mb-1">Court</label>
+                <input value={warrant.courtName} onChange={(e) => setWarrant({...warrant, courtName: e.target.value})} className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100" />
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Venue</label>
+                  <input value={warrant.venue} onChange={(e) => setWarrant({...warrant, venue: e.target.value})} className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100" />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Date</label>
+                  <input type="date" value={warrant.filingDate} onChange={(e) => setWarrant({...warrant, filingDate: e.target.value})} className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100" />
+                </div>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">IO Name</label>
+                  <input value={warrant.ioName} onChange={(e) => setWarrant({...warrant, ioName: e.target.value})} className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100" />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">IO Rank</label>
+                  <input value={warrant.ioRank} onChange={(e) => setWarrant({...warrant, ioRank: e.target.value})} className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100" />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">IO Badge</label>
+                  <input value={warrant.ioBadge} onChange={(e) => setWarrant({...warrant, ioBadge: e.target.value})} className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100 font-mono" />
+                </div>
+              </div>
 
-            <button
-              onClick={async () => {
-                if (signBusy) return;
-                setSignBusy(true);
-                setSignMsg(null);
-                try {
-                  const res = await caseApi.signDossier(currentCase.id, {
-                    regNumber: regNumber.trim(),
-                    court: courtName,
-                    venue,
-                  });
-                  setSignatures((p) => [res.signature, ...p]);
-                  setSignMsg({ ok: true, text: `Signed & certified under Sec 65B/63 (${res.signature.signature_hash.slice(0, 24)}…).` });
-                } catch (err: any) {
-                  setSignMsg({ ok: false, text: err.message || "Signing failed. Leads/Admins only." });
-                } finally {
-                  setSignBusy(false);
-                }
-              }}
-              disabled={signBusy || !regNumber.trim()}
-              className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition-colors disabled:opacity-50"
-              title="Sign & Certify this dossier under Section 65B IEA / Section 63 BSA"
-            >
-              <FileSignature className="w-4 h-4" />
-              <span>{signBusy ? "Signing…" : "Sign & Certify (65B/63)"}</span>
-            </button>
+            {/* Manual Points */}
+            <div className="bg-slate-950 border border-slate-700 rounded-lg p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-bold text-slate-200">Additional Points for the Warrant</h4>
+                <button onClick={addManualPoint} className="px-2 py-1 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded text-xs font-bold flex items-center gap-1">
+                  <Plus className="w-3 h-3" /> Add Point
+                </button>
+              </div>
+              {warrant.manualPoints.length === 0 ? (
+                <p className="text-xs text-slate-500">No additional points. The warrant will be generated from case facts and allegations above.</p>
+              ) : (
+                <div className="space-y-2">
+                  {warrant.manualPoints.map((p) => (
+                    <div key={p.id} className="flex gap-2">
+                      <textarea
+                        value={p.text}
+                        onChange={(e) => updateManualPoint(p.id, e.target.value)}
+                        placeholder="Enter additional legal point, precedent, or fact..."
+                        rows={2}
+                        className="flex-1 bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100"
+                      />
+                      <button onClick={() => removeManualPoint(p.id)} className="p-1.5 text-rose-400 hover:text-rose-300"><Trash2 className="w-4 h-4" /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
-            <button
-              onClick={handleCopyMarkdown}
-              className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors"
-            >
-              {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-              <span>{copied ? "Copied to Clipboard!" : "Copy Markdown"}</span>
-            </button>
+              <div className="flex justify-between pt-2">
+                <button onClick={() => setStep("sections")} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg">Back</button>
+                <button onClick={generateWarrant} disabled={isGenerating} className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg disabled:opacity-50 flex items-center gap-2">
+                  {isGenerating ? <><Sparkles className="w-4 h-4 animate-spin" /> Generating...</> : <><Sparkles className="w-4 h-4" /> Generate with SAHAYAK</>}
+                </button>
+              </div>
+            </div>
+          )}
 
-            <button
-              onClick={handleDownloadJSON}
-              className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors"
-            >
-              <Download className="w-4 h-4" />
-              <span>Export JSON Annexure</span>
-            </button>
-          </div>
-
-          <button
-            onClick={onClose}
-            className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-lg transition-colors shadow"
-          >
-            Done
-          </button>
+          {/* STEP 4: Final Review & Print */}
+          {step === "final" && generatedText && (
+            <div className="space-y-4">
+              <h3 className="text-sm font-bold text-amber-400">Generated Warrant — Review & Print</h3>
+              <div className="bg-slate-950 border border-slate-700 rounded-lg p-4 max-h-[50vh] overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed font-serif text-slate-100">
+                {generatedText}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={handleCopy} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg flex items-center gap-2"><Copy className="w-4 h-4" /> Copy</button>
+                <button onClick={handlePrint} className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg flex items-center gap-2"><Printer className="w-4 h-4" /> Print</button>
+                <button onClick={() => { setGeneratedText(null); setStep("select"); }} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg">New Warrant</button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 };
+
+export default DossierModal;

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { adminApi, migrationApi } from "../../services/api";
+import { KNOWN_STATES } from "../../data/roles";
 import { ArrowRightLeft, ShieldAlert, CheckCircle2, AlertTriangle } from "lucide-react";
 
 /**
@@ -146,8 +147,9 @@ export const MigrationPanel: React.FC<{ onChanged?: () => void }> = ({ onChanged
             <label className="block">
               <span className="text-[11px] font-semibold text-slate-400">Incoming state</span>
               <select value={hState} onChange={(e) => setHState(e.target.value)} className={inputCls}>
-                <option value="MAHARASHTRA">MAHARASHTRA</option>
-                <option value="KARNATAKA">KARNATAKA</option>
+                {KNOWN_STATES.map((s) => (
+                  <option key={s.code} value={s.code}>{s.label} ({s.code})</option>
+                ))}
               </select>
             </label>
           )}

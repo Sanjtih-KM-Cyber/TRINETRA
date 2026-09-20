@@ -40,6 +40,11 @@ export const PathFinder: React.FC<PathFinderProps> = ({
   const [trailPreference, setTrailPreference] = useState<"ALL" | "HAWALA_FINANCIAL" | "TELECOM_CDR">("ALL");
   const [pathResult, setPathResult] = useState<ShortestPathResult | null>(null);
   const [pathError, setPathError] = useState<string | null>(null);
+  // Entities awaiting review stay on the canvas (yellow) but are excluded
+  // from linking suggestions until confirmed.
+  const linkableNodes = nodes.filter(
+    (n) => (n.reviewState || "NEEDS_REVIEW") !== "NEEDS_REVIEW" && (n.reviewState || "") !== "REJECTED"
+  );
   // Phase 7 Req31 — link-graph viewport expansion.
   const viewRef = useRef<HTMLDivElement | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -163,7 +168,7 @@ export const PathFinder: React.FC<PathFinderProps> = ({
             className="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:ring-1 focus:ring-amber-500 focus:outline-none"
           >
             <option value="">-- Select Origin Entity --</option>
-            {nodes.map((n) => (
+            {linkableNodes.map((n) => (
               <option key={n.id} value={n.id}>
                 {n.label} ({n.role || n.type})
               </option>
@@ -183,7 +188,7 @@ export const PathFinder: React.FC<PathFinderProps> = ({
             className="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:ring-1 focus:ring-amber-500 focus:outline-none"
           >
             <option value="">-- Select Target Entity --</option>
-            {nodes.map((n) => (
+            {linkableNodes.map((n) => (
               <option key={n.id} value={n.id}>
                 {n.label} ({n.role || n.type})
               </option>
@@ -193,11 +198,11 @@ export const PathFinder: React.FC<PathFinderProps> = ({
       </div>
 
       {/* Quick presets for rapid investigation */}
-      {nodes.length >= 2 && (
+      {linkableNodes.length >= 2 && (
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-400">
           <span className="text-[11px] font-semibold text-slate-500">Quick Test Pairs:</span>
-          {nodes.slice(0, 3).map((n1, idx) => {
-            const n2 = nodes[(idx + 2) % nodes.length];
+          {linkableNodes.slice(0, 3).map((n1, idx) => {
+            const n2 = linkableNodes[(idx + 2) % linkableNodes.length];
             if (!n2 || n1.id === n2.id) return null;
             return (
               <button

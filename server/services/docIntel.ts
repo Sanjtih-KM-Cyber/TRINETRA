@@ -63,27 +63,47 @@ export function scoreLine(line: string): string[] {
   return reasons;
 }
 
+const EXTRACT_STOP = new Set(
+  ("a,an,the,and,or,but,if,then,else,for,to,of,in,on,at,by,with,from,as,is,are,was,were,be,been,being,have,has,had,do,does,did,will,would,shall,should,can,could,may,might,must,this,that,these,those,it,its,they,them,their,he,she,we,you,i,not,no,so,such,than,too,very,also,into,upon,per,via,which,who,whom,whose,what,when,where,all,any,each,other,more,most,such,only,own,same,here,there,between,through,during,before,after,above,below,under,over,about,against,among,within,without,respect,regard,honble,mr,ms,mrs,adv,ors,no,dated,sd,rs,vs").split(",")
+);
+
 /**
- * Extractive summary for offline use: the highest-signal lines in document
- * order, each tagged with why it was picked. No model required.
+ * Extractive summary for offline use: frequency-ranked sentences
+ * (TextRank-lite) in document order. Works on ANY narrative text —
+ * court orders, FIRs, statements — never just identifier-bearing lines.
+ * No model required.
  */
-export function extractiveSummary(text: string, maxLines = 6): { lines: string[]; summary: string } {
-  const scored = text
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 30)
-    .map((line, i) => ({ line, i, score: scoreLine(line).length }))
-    .filter((s) => s.score > 0)
+export function extractiveSummary(text: string, maxLines = 8): { lines: string[]; summary: string } {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (clean.length < 60) return { lines: [], summary: "Document too short to summarize." };
+  const rawSentences = clean.match(/[^.!?…]+[.!?…]+["']?/g) || [clean];
+  const sentences = rawSentences.map((s) => s.trim()).filter((s) => s.length >= 40 && s.length <= 600);
+  if (sentences.length === 0) return { lines: [], summary: clean.slice(0, 800) };
+
+  const freq = new Map<string, number>();
+  for (const s of sentences) {
+    for (const w of s.toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/)) {
+      if (w.length > 3 && !EXTRACT_STOP.has(w)) freq.set(w, (freq.get(w) || 0) + 1);
+    }
+  }
+  const scored = sentences.map((s, i) => {
+    const words = s.toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/).filter((w) => w.length > 3 && !EXTRACT_STOP.has(w));
+    const sum = words.reduce((a, w) => a + (freq.get(w) || 0), 0);
+    const score = words.length > 0 ? sum / Math.sqrt(words.length) : 0;
+    // Lead paragraphs carry the holding — small position bonus.
+    const positionBonus = i < 4 ? 0.6 : 0;
+    // Operative sentences (orders, dates, sections) get a lift.
+    const operativeBonus = /(order|directed|held|section|rule|shall|filed|fixed|submitted|sanctioned|rs\.?\s|₹)/i.test(s) ? 0.8 : 0;
+    return { s, i, score: score + positionBonus + operativeBonus };
+  });
+  const picked = scored
     .sort((a, b) => b.score - a.score || a.i - b.i)
-    .slice(0, maxLines)
+    .slice(0, Math.min(maxLines, Math.max(3, sentences.length)))
     .sort((a, b) => a.i - b.i);
-  const lines = scored.map((s) => s.line);
+  const lines = picked.map((p) => p.s);
   return {
     lines,
-    summary:
-      lines.length > 0
-        ? `Key extracts (${lines.length} highest-signal lines, document order):\n- ${lines.join("\n- ")}`
-        : "No identifier-bearing lines found to summarize.",
+    summary: `Extractive brief (${lines.length} key passages, document order, offline rules engine):\n\n${lines.map((l, i) => `${i + 1}. ${l}`).join("\n\n")}`,
   };
 }
 

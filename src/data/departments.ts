@@ -1,3 +1,5 @@
+import { STATE_META } from "./roles";
+
 export type DepartmentCode =
   | "CBI"
   | "NIA"
@@ -19,6 +21,8 @@ export interface DepartmentIdentity {
   primaryColor: string;
   secondaryColor: string;
   accentColor: string;
+  /** Official red — high-priority badges, alert tags, secondary buttons. */
+  dangerColor: string;
   backgroundGradient: string;
   headquarters: string;
   jurisdiction: string;
@@ -26,6 +30,18 @@ export interface DepartmentIdentity {
   clearance: string;
   ranks: AgencyRank[];
   emblemSvg: string;
+  /**
+   * Short tenant key for the <html data-dept> attribute (CBI, NIA, CID,
+   * STATE, MH, WB, KL, DL, GJ, RJ, UP, BR, AS, KAR, AP, TS …). Inspect it
+   * in devtools to confirm which palette is live for the signed-in officer.
+   */
+  tenant: string;
+  /**
+   * Official emblem photo served from /logos (see public/logos/README.txt).
+   * Drop the official logo file at this path; until it exists the built-in
+   * SVG emblem renders automatically as fallback.
+   */
+  logoPath: string;
 }
 
 export const DEPARTMENTS: Record<DepartmentCode, DepartmentIdentity> = {
@@ -35,14 +51,17 @@ export const DEPARTMENTS: Record<DepartmentCode, DepartmentIdentity> = {
     shortName: "CBI",
     motto: "Industry, Impartiality, Integrity",
     mottoHindi: "उद्योग, निष्पक्षता, सत्यनिष्ठा",
-    primaryColor: "#002147",
-    secondaryColor: "#C5A059",
-    accentColor: "#C5A059",
-    backgroundGradient: "from-[#002147] via-slate-950 to-[#3a2f14]",
+    primaryColor: "#003B5C",
+    secondaryColor: "#FFFFFF",
+    accentColor: "#D4AF37",
+    dangerColor: "#C8102E",
+    backgroundGradient: "from-[#003B5C] via-slate-950 to-[#3a2f14]",
     headquarters: "CGO Complex, New Delhi",
     jurisdiction: "Pan-India · Interpol Liaison",
     gateway: "CCTNS-GW-CBI-01",
     clearance: "TOP_SECRET",
+    logoPath: "/logos/cbi.png",
+    tenant: "CBI",
     ranks: [
       { short: "DIR", full: "Director", level: 1 },
       { short: "SPL DIR", full: "Special Director", level: 2 },
@@ -63,14 +82,17 @@ export const DEPARTMENTS: Record<DepartmentCode, DepartmentIdentity> = {
     shortName: "NIA",
     motto: "Courage, Compassion, Resolve",
     mottoHindi: "साहस, करुणा, संकल्प",
-    primaryColor: "#1B1B1B",
-    secondaryColor: "#8B0000",
-    accentColor: "#D4AF37",
-    backgroundGradient: "from-[#1B1B1B] via-[#2a0a0a] to-[#3a2f10]",
+    primaryColor: "#003366",
+    secondaryColor: "#FFFFFF",
+    accentColor: "#FF9933",
+    dangerColor: "#C00000",
+    backgroundGradient: "from-[#003366] via-[#1a0d05] to-[#3a2f10]",
     headquarters: "CGO Complex, New Delhi",
     jurisdiction: "Pan-India · Counter-Terrorism",
     gateway: "CCTNS-GW-NIA-01",
     clearance: "TOP_SECRET",
+    logoPath: "/logos/nia.png",
+    tenant: "NIA",
     ranks: [
       { short: "DG", full: "Director General", level: 1 },
       { short: "ADG", full: "Additional Director General", level: 2 },
@@ -91,13 +113,16 @@ export const DEPARTMENTS: Record<DepartmentCode, DepartmentIdentity> = {
     motto: "Detection Through Dedication",
     mottoHindi: "समर्पण से उद्भेदन",
     primaryColor: "#0A2342",
-    secondaryColor: "#FFFFFF",
+    secondaryColor: "#334155",
     accentColor: "#3E92CC",
+    dangerColor: "#C8102E",
     backgroundGradient: "from-[#0A2342] via-slate-950 to-slate-900",
     headquarters: "State CID Headquarters",
     jurisdiction: "State · Multi-District Special Crimes",
     gateway: "CCTNS-GW-CID-01",
     clearance: "SECRET",
+    logoPath: "/logos/cid.png",
+    tenant: "CID",
     ranks: [
       { short: "ADGP", full: "Additional Director General", level: 1 },
       { short: "IGP", full: "Inspector General", level: 2 },
@@ -116,14 +141,17 @@ export const DEPARTMENTS: Record<DepartmentCode, DepartmentIdentity> = {
     shortName: "State Police",
     motto: "Service Before Self · Satyameva Jayate",
     mottoHindi: "सत्यमेव जयते",
-    primaryColor: "#4A3728",
-    secondaryColor: "#0D2240",
+    primaryColor: "#0A2342",
+    secondaryColor: "#334155",
     accentColor: "#C5A059",
-    backgroundGradient: "from-[#4A3728] via-[#0D2240] to-slate-950",
+    dangerColor: "#C8102E",
+    backgroundGradient: "from-[#0A2342] via-slate-950 to-slate-900",
     headquarters: "State Police HQ",
     jurisdiction: "State · CrPC / BNSS",
     gateway: "CCTNS-GW-STATE-01",
     clearance: "RESTRICTED",
+    logoPath: "/logos/police.png",
+    tenant: "STATE",
     ranks: [
       { short: "DGP", full: "Director General of Police", level: 1 },
       { short: "ADGP", full: "Additional DGP", level: 2 },
@@ -143,6 +171,96 @@ export const DEPARTMENTS: Record<DepartmentCode, DepartmentIdentity> = {
 };
 
 export const DEPARTMENT_LIST: DepartmentIdentity[] = Object.values(DEPARTMENTS);
+
+// ---------------------------------------------------------------------------
+// Official state-police palettes (sanctioned colour scheme). Each keeps
+// code "STATE_POLICE" so dashboards/widgets keep working; colours, emblem
+// photo, gateway and jurisdiction are state-specific.
+// ---------------------------------------------------------------------------
+
+interface StatePalette {
+  primary: string;
+  secondary: string;
+  accent: string;
+  danger: string;
+  gradient: string;
+}
+
+function stateIdentity(
+  stateCode: string,
+  label: string,
+  short: string,
+  palette: StatePalette,
+  logoFile: string
+): DepartmentIdentity {
+  return {
+    code: "STATE_POLICE",
+    tenant: short,
+    fullName: `${label} Police`,
+    shortName: `${label} Police`,
+    motto: "Service Before Self · Satyameva Jayate",
+    mottoHindi: "सत्यमेव जयते",
+    primaryColor: palette.primary,
+    secondaryColor: palette.secondary,
+    accentColor: palette.accent,
+    dangerColor: palette.danger,
+    backgroundGradient: palette.gradient,
+    headquarters: `${label} Police Headquarters`,
+    jurisdiction: `${label} · CrPC / BNSS`,
+    gateway: `CCTNS-GW-${short}-01`,
+    clearance: "RESTRICTED",
+    ranks: DEPARTMENTS.STATE_POLICE.ranks,
+    emblemSvg: DEPARTMENTS.STATE_POLICE.emblemSvg,
+    logoPath: `/logos/${logoFile}`,
+  };
+}
+
+const ROYAL_BLUE_GOLD: StatePalette = {
+  primary: "#003B70",
+  secondary: "#FFFFFF",
+  accent: "#D4AF37",
+  danger: "#C00000",
+  gradient: "from-[#003B70] via-slate-950 to-slate-900",
+};
+
+export const STATE_DEPARTMENTS: Record<string, DepartmentIdentity> = {
+  MAHARASHTRA: stateIdentity("MAHARASHTRA", "Maharashtra", "MHA", {
+    primary: "#003B70", secondary: "#FFFFFF", accent: "#FFFFFF", danger: "#C8102E",
+    gradient: "from-[#003B70] via-slate-950 to-slate-900",
+  }, "mh.png"),
+  WEST_BENGAL: stateIdentity("WEST_BENGAL", "West Bengal", "WB", {
+    primary: "#003153", secondary: "#FFFFFF", accent: "#C8102E", danger: "#C8102E",
+    gradient: "from-[#003153] via-slate-950 to-slate-900",
+  }, "wb.png"),
+  KERALA: stateIdentity("KERALA", "Kerala", "KL", {
+    primary: "#F28C28", secondary: "#0057A8", accent: "#FFD700", danger: "#C00000",
+    gradient: "from-[#4A2408] via-slate-950 to-slate-900",
+  }, "kl.png"),
+  DELHI: stateIdentity("DELHI", "Delhi", "DL", {
+    primary: "#003399", secondary: "#001A4D", accent: "#C8A951", danger: "#C00000",
+    gradient: "from-[#003399] via-slate-950 to-slate-900",
+  }, "dl.png"),
+  GUJARAT: stateIdentity("GUJARAT", "Gujarat", "GJ", ROYAL_BLUE_GOLD, "gj.png"),
+  RAJASTHAN: stateIdentity("RAJASTHAN", "Rajasthan", "RJ", ROYAL_BLUE_GOLD, "rj.png"),
+  UTTAR_PRADESH: stateIdentity("UTTAR_PRADESH", "Uttar Pradesh", "UP", ROYAL_BLUE_GOLD, "up.png"),
+  BIHAR: stateIdentity("BIHAR", "Bihar", "BR", ROYAL_BLUE_GOLD, "br.png"),
+  ASSAM: stateIdentity("ASSAM", "Assam", "AS", ROYAL_BLUE_GOLD, "as.png"),
+  KARNATAKA: stateIdentity("KARNATAKA", "Karnataka", "KAR", ROYAL_BLUE_GOLD, "ka.png"),
+  ANDHRA_PRADESH: stateIdentity("ANDHRA_PRADESH", "Andhra Pradesh", "AP", ROYAL_BLUE_GOLD, "ap.png"),
+  TELANGANA: stateIdentity("TELANGANA", "Telangana", "TS", ROYAL_BLUE_GOLD, "ts.png"),
+  TAMIL_NADU: stateIdentity("TAMIL_NADU", "Tamil Nadu", "TN", ROYAL_BLUE_GOLD, "tn.png"),
+  MADHYA_PRADESH: stateIdentity("MADHYA_PRADESH", "Madhya Pradesh", "MP", ROYAL_BLUE_GOLD, "mp.png"),
+  PUNJAB: stateIdentity("PUNJAB", "Punjab", "PB", ROYAL_BLUE_GOLD, "pb.png"),
+};
+
+/** State-specific identity, or the neutral slate State Police fallback. */
+export function departmentForState(state?: string): DepartmentIdentity {
+  if (state) {
+    const hit = STATE_DEPARTMENTS[String(state).toUpperCase()];
+    if (hit) return hit;
+  }
+  return DEPARTMENTS.STATE_POLICE;
+}
 
 export function getDepartment(code: string): DepartmentIdentity {
   const upper = code.toUpperCase().replace(/[^A-Z_]/g, "");
@@ -167,20 +285,59 @@ export function agencyToDepartment(agency: string): DepartmentIdentity {
 }
 
 /**
- * Gov-ID prefix (cbi_/nia_/cid_/police_kar_/police_mah_) → department + state.
- * Returns null when the identifier carries no recognized prefix (e.g. a bare
- * email) so callers don't mislabel it as State Police.
+ * Officer-ID → department + state. Handles every sanctioned identifier form:
+ * badge prefixes (`cbi_*`, `CBI-*`, `police_mha_*`, `MHA-*`, `cid_mha_*`,
+ * `CID-MHA-*`, …) and official emails (`rao@cbi.gov.in`,
+ * `patil@mahapolice.gov.in`, `sharma@cid.gov.in`, …).
+ * State matches resolve to the sanctioned state palette (Maharashtra blue +
+ * white, West Bengal Prussian blue + red, Kerala multi-colour, Delhi blue +
+ * gold, royal blue + gold for the rest) so the frontend recolors directly
+ * from the officer ID. Returns null when the identifier carries no
+ * recognized badge prefix or gov domain, so callers don't mislabel it.
  */
 export function detectGovTenant(identifier: string): { department: DepartmentIdentity; state?: string } | null {
-  const id = (identifier || "").toLowerCase();
+  const id = (identifier || "").trim().toLowerCase();
+  if (!id) return null;
+
+  // Federal badges (underscore + dash forms): cbi_*, CBI-*, nia_*, NIA-*, …
   if (id.startsWith("cbi_") || id.startsWith("cbi-")) return { department: DEPARTMENTS.CBI };
   if (id.startsWith("nia_") || id.startsWith("nia-")) return { department: DEPARTMENTS.NIA };
+
+  // CID statewise badges first (cid_mha_*, CID-MHA-*, …), then bare cid_* / CID-*.
+  // CID has no single India-wide colour — it always renders the CID palette.
+  for (const [code, meta] of Object.entries(STATE_META)) {
+    const short = meta.short.toLowerCase();
+    if (
+      id.startsWith(`cid_${short}_`) || id.startsWith(`cid_${short}-`) ||
+      id.startsWith(`cid-${short}_`) || id.startsWith(`cid-${short}-`)
+    )
+      return { department: DEPARTMENTS.CID, state: code };
+  }
   if (id.startsWith("cid_") || id.startsWith("cid-")) return { department: DEPARTMENTS.CID };
-  if (id.startsWith("police_kar_") || id.startsWith("kar-"))
-    return { department: DEPARTMENTS.STATE_POLICE, state: "KARNATAKA" };
-  if (id.startsWith("police_mah_") || id.startsWith("mha-"))
-    return { department: DEPARTMENTS.STATE_POLICE, state: "MAHARASHTRA" };
-  if (id.startsWith("police_")) return { department: DEPARTMENTS.STATE_POLICE };
+
+  // State-police badges: police_<short>_* and bare <short>-* (MHA-*, KAR-*, …).
+  for (const [code, meta] of Object.entries(STATE_META)) {
+    const short = meta.short.toLowerCase();
+    if (id.startsWith(`police_${short}_`) || id.startsWith(`police-${short}-`) || id.startsWith(`${short}-`))
+      return { department: departmentForState(code), state: code };
+  }
+  if (id.startsWith("police_") || id.startsWith("police-")) return { department: DEPARTMENTS.STATE_POLICE };
+
+  // Official email domains: rao@cbi.gov.in, qureshi@nia.gov.in,
+  // sharma@cid.gov.in, patil@mahapolice.gov.in, rao@karpolice.gov.in, …
+  const at = id.lastIndexOf("@");
+  if (at > 0) {
+    const domain = id.slice(at + 1);
+    if (domain === "cbi.gov.in") return { department: DEPARTMENTS.CBI };
+    if (domain === "nia.gov.in") return { department: DEPARTMENTS.NIA };
+    if (domain === "cid.gov.in") return { department: DEPARTMENTS.CID };
+    for (const [code, meta] of Object.entries(STATE_META)) {
+      if (domain === meta.domain.toLowerCase())
+        return { department: departmentForState(code), state: code };
+    }
+    if (domain.endsWith("police.gov.in")) return { department: DEPARTMENTS.STATE_POLICE };
+  }
+
   return null;
 }
 

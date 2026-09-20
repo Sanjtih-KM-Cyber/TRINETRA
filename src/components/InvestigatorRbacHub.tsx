@@ -69,35 +69,34 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
       {/* Top Header */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+      <div className="glass-panel border-white/10 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 rounded-2xl p-6 shadow-2xl">
         <div className="flex items-center gap-3">
-          <div className="p-3 bg-amber-500/10 rounded-xl text-amber-400 border border-amber-500/20">
+          <div className="p-3 rounded-xl glass-panel text-primary border border-primary/30 shadow-[0_0_15px_rgba(var(--color-primary),0.3)]">
             <Shield className="w-6 h-6" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+              <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-primary/20 text-on-surface border border-primary/30">
                 CASE ACCESS GOVERNANCE & RBAC
               </span>
-              <span className="text-[10px] font-mono text-slate-400">
+              <span className="text-[10px] font-mono text-on-surface-variant">
                 IMMUTABLE CHAIN-OF-CUSTODY AUDIT
               </span>
             </div>
-            <h2 className="text-base font-bold text-slate-100 mt-0.5">
+            <h2 className="text-base font-bold text-on-surface mt-0.5">
               Investigator Credentials & Security Authorization
             </h2>
           </div>
         </div>
 
         {/* View Switcher Tabs */}
-        <div className="flex items-center gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-800">
+        <div className="flex items-center gap-1.5 glass-strong p-1.5 rounded-xl border border-white/5">
           <button
             onClick={() => setActiveTab("profiles")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors ${
-              activeTab === "profiles"
-                ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors ${activeTab === "profiles"
+              ? "glass-panel text-primary border border-primary/30 shadow-sm"
+              : "text-on-surface-variant hover:text-on-surface hover:bg-surface-container"
+              }`}
           >
             <Users className="w-3.5 h-3.5" />
             <span>Active Session Profile</span>
@@ -105,11 +104,10 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
 
           <button
             onClick={() => setActiveTab("audit")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors ${
-              activeTab === "audit"
-                ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors ${activeTab === "audit"
+              ? "glass-panel text-primary border border-primary/30 shadow-sm"
+              : "text-on-surface-variant hover:text-on-surface hover:bg-surface-container"
+              }`}
           >
             <Clock className="w-3.5 h-3.5" />
             <span>Digital Audit Log ({auditLogs.length})</span>
@@ -117,11 +115,10 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
 
           <button
             onClick={() => setActiveTab("matrix")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors ${
-              activeTab === "matrix"
-                ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors ${activeTab === "matrix"
+              ? "glass-panel text-primary border border-primary/30 shadow-sm"
+              : "text-on-surface-variant hover:text-on-surface hover:bg-surface-container"
+              }`}
           >
             <Lock className="w-3.5 h-3.5" />
             <span>RBAC Matrix</span>
@@ -134,67 +131,67 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
             {/* Authenticated Identity Card */}
-            <div className="md:col-span-1 bg-slate-900 border border-amber-500/40 rounded-2xl p-5 shadow-xl relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-32 h-32 bg-amber-500/5 rounded-full blur-2xl pointer-events-none" />
+            <div className="md:col-span-1 glass-panel border-primary/40 rounded-2xl p-6 shadow-xl relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-32 h-32 bg-primary/5 rounded-full blur-2xl pointer-events-none" />
               <div className="flex items-center justify-between mb-4">
                 <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${activeOfficerBadge.color}`}>
                   {activeOfficerBadge.label}
                 </span>
-                <span className="flex items-center gap-1.5 text-[10px] font-mono text-emerald-400">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="flex items-center gap-1.5 text-[10px] font-mono text-success">
+                  <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
                   AUTHENTICATED
                 </span>
               </div>
 
               <div className="flex items-center gap-3.5 mb-4">
                 <div
-                  className="w-12 h-12 rounded-xl flex items-center justify-center font-bold text-slate-950 font-mono text-base border-2 border-slate-700 shadow-md"
+                  className="w-12 h-12 rounded-xl flex items-center justify-center font-bold text-surface-container font-mono text-base border-2 border-white/10 shadow-md"
                   style={{ backgroundColor: currentOfficer.avatarColor || "#f59e0b" }}
                 >
                   {currentOfficer.name.slice(0, 2).toUpperCase()}
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-slate-100 flex items-center gap-1.5">
+                  <h3 className="text-base font-bold text-on-surface flex items-center gap-1.5">
                     {currentOfficer.name}
-                    <BadgeCheck className="w-4 h-4 text-amber-400" />
+                    <BadgeCheck className="w-4 h-4 text-primary" />
                   </h3>
-                  <p className="text-xs text-slate-400 font-mono">{currentOfficer.rank}</p>
+                  <p className="text-xs text-on-surface-variant font-mono">{currentOfficer.rank}</p>
                 </div>
               </div>
 
-              <div className="text-xs font-mono text-slate-300 bg-slate-950/70 p-3 rounded-xl border border-slate-800 space-y-1.5">
+              <div className="text-xs font-mono text-on-surface-variant glass-strong p-3 rounded-xl border border-white/5 space-y-1.5">
                 <div className="flex justify-between">
-                  <span className="text-slate-500">Official ID:</span>
-                  <span className="text-slate-200 font-semibold">{currentOfficer.badgeNumber}</span>
+                  <span className="text-on-surface-variant/70">Official ID:</span>
+                  <span className="text-on-surface font-semibold">{currentOfficer.badgeNumber}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-500">Agency:</span>
-                  <span className="text-slate-200">{currentOfficer.agency || "National Investigation Agency (NIA)"}</span>
+                  <span className="text-on-surface-variant/70">Agency:</span>
+                  <span className="text-on-surface">{currentOfficer.agency || "National Investigation Agency (NIA)"}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-500">Department:</span>
-                  <span className="text-slate-200">{currentOfficer.department}</span>
+                  <span className="text-on-surface-variant/70">Department:</span>
+                  <span className="text-on-surface">{currentOfficer.department}</span>
                 </div>
               </div>
 
-              <div className="mt-4 text-[11px] text-amber-300/90 font-mono bg-amber-500/10 border border-amber-500/20 p-3 rounded-xl">
-                <div className="text-[9px] text-amber-500 font-bold uppercase mb-0.5">Active Mission Role:</div>
+              <div className="mt-4 text-[11px] text-on-surface font-mono glass-panel border border-primary/20 shadow-[0_0_10px_rgba(var(--color-primary),0.1)] p-3 rounded-xl">
+                <div className="text-[9px] text-primary font-bold uppercase mb-0.5">Active Mission Role:</div>
                 {currentOfficer.role === "LEAD_INVESTIGATOR"
                   ? "Full syndicate graph analysis, AI copilot queries, node sanctioning, and chargesheet signing."
                   : currentOfficer.role === "FORENSIC_INVESTIGATOR"
-                  ? "Digital evidence intake, CDR triangulation, IMEI correlation, and forensic validation."
-                  : "National security platform administration and case membership governance."}
+                    ? "Digital evidence intake, CDR triangulation, IMEI correlation, and forensic validation."
+                    : "National security platform administration and case membership governance."}
               </div>
             </div>
 
             {/* Cryptographic Privileges & Scope */}
-            <div className="md:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col justify-between">
+            <div className="md:col-span-2 glass-panel border-white/10 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
               <div>
-                <h3 className="text-xs font-mono font-bold text-slate-200 uppercase tracking-wider mb-3 flex items-center gap-2">
-                  <Key className="w-4 h-4 text-amber-400" />
+                <h3 className="text-xs font-mono font-bold text-primary uppercase tracking-wider mb-3 flex items-center gap-2">
+                  <Key className="w-4 h-4 text-primary" />
                   Active Cryptographic Privileges & Authority Matrix
                 </h3>
-                <p className="text-xs text-slate-400 mb-4">
+                <p className="text-xs text-on-surface-variant mb-4">
                   Privileges are cryptographically bound to your authenticated session token under statutory National Security guidelines.
                 </p>
 
@@ -209,22 +206,21 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
                   ].map((perm, idx) => (
                     <div
                       key={idx}
-                      className={`p-3 rounded-xl border flex flex-col justify-between ${
-                        perm.granted
-                          ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
-                          : "bg-slate-950/60 border-slate-800 text-slate-500 opacity-60"
-                      }`}
+                      className={`p-3 rounded-xl border flex flex-col justify-between ${perm.granted
+                        ? "glass-strong border-success/30 text-success"
+                        : "glass-strong border-white/5 text-on-surface-variant opacity-60"
+                        }`}
                     >
                       <span className="text-xs font-semibold">{perm.label}</span>
                       <span className="mt-2 text-[10px] font-mono font-bold flex items-center gap-1">
                         {perm.granted ? (
                           <>
-                            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                            <CheckCircle2 className="w-3 h-3 text-success" />
                             <span>AUTHORIZED</span>
                           </>
                         ) : (
                           <>
-                            <Lock className="w-3 h-3 text-slate-500" />
+                            <Lock className="w-3 h-3 text-on-surface-variant" />
                             <span>RESTRICTED</span>
                           </>
                         )}
@@ -234,9 +230,9 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
                 </div>
               </div>
 
-              <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between text-[11px] font-mono text-slate-500">
+              <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between text-[11px] font-mono text-on-surface-variant">
                 <span>Session Security: Level-4 LEA Encrypted</span>
-                <span className="text-emerald-400 flex items-center gap-1">
+                <span className="text-success flex items-center gap-1">
                   <ShieldAlert className="w-3.5 h-3.5" />
                   Secured via JWT & Role Enforcement
                 </span>
@@ -248,25 +244,25 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
 
       {/* Tab 2: Digital Audit Log */}
       {activeTab === "audit" && (
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
+        <div className="glass-panel border-white/10 rounded-2xl p-6 shadow-xl space-y-4">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <div className="relative w-full sm:w-80">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <Search className="w-4 h-4 text-on-surface-variant absolute left-3 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
                 placeholder="Search audit trail, SHA-256 hash, officer..."
                 value={auditSearch}
                 onChange={(e) => setAuditSearch(e.target.value)}
-                className="bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-4 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 w-full"
+                className="glass-strong border border-white/10 rounded-xl pl-9 pr-4 py-2 text-xs text-on-surface placeholder-on-surface-variant focus:outline-none focus:border-primary w-full"
               />
             </div>
 
             <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-400 font-mono">Role:</span>
+              <span className="text-xs text-on-surface-variant font-mono">Role:</span>
               <select
                 value={roleFilter}
                 onChange={(e) => setRoleFilter(e.target.value as any)}
-                className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-amber-500"
+                className="glass-strong border border-white/10 rounded-xl px-3 py-1.5 text-xs text-on-surface font-mono focus:outline-none focus:border-primary"
               >
                 <option value="ALL">All Roles</option>
                 <option value="ADMIN">System Administrator</option>
@@ -279,7 +275,7 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
           {/* Audit Table */}
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs font-mono">
-              <thead className="bg-slate-950 text-slate-400 border-b border-slate-800">
+              <thead className="glass-strong text-on-surface-variant border-b border-white/10">
                 <tr>
                   <th className="py-2.5 px-3">Timestamp (UTC)</th>
                   <th className="py-2.5 px-3">Officer / Role</th>
@@ -288,31 +284,31 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
                   <th className="py-2.5 px-3">Cryptographic Digest (SHA-256)</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800/60">
+              <tbody className="divide-y divide-white/5">
                 {filteredLogs.map((log) => {
                   const badge = getRoleBadge(log.officerRole);
                   return (
-                    <tr key={log.id} className="hover:bg-slate-850/50 transition-colors">
-                      <td className="py-3 px-3 text-slate-400 whitespace-nowrap">
+                    <tr key={log.id} className="hover:bg-surface-container transition-colors">
+                      <td className="py-3 px-3 text-on-surface-variant whitespace-nowrap">
                         {new Date(log.timestamp).toISOString().replace("T", " ").slice(0, 19)}
                       </td>
                       <td className="py-3 px-3">
-                        <strong className="text-slate-200 block font-sans text-xs">{log.officerName || log.user || "System"}</strong>
+                        <strong className="text-on-surface block font-sans text-xs">{log.officerName || log.user || "System"}</strong>
                         <span className={`text-[9px] px-1.5 py-0.2 rounded border ${badge.color}`}>
                           {badge.label}
                         </span>
                       </td>
                       <td className="py-3 px-3">
-                        <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-amber-300 font-bold text-[10px]">
+                        <span className="px-2 py-0.5 rounded glass-panel border border-white/5 text-primary font-bold text-[10px]">
                           {log.actionType || log.action}
                         </span>
                       </td>
                       <td className="py-3 px-3">
-                        <div className="text-slate-200 font-sans text-xs">{log.targetLabel || "Case Artifact"}</div>
-                        <div className="text-slate-500 text-[10px] truncate max-w-xs">{log.details}</div>
+                        <div className="text-on-surface font-sans text-xs">{log.targetLabel || "Case Artifact"}</div>
+                        <div className="text-on-surface-variant text-[10px] truncate max-w-xs">{log.details}</div>
                       </td>
                       <td className="py-3 px-3 text-sky-400 font-mono text-[10px]">
-                        <span className="bg-sky-950/40 border border-sky-800/60 px-2 py-0.5 rounded">
+                        <span className="glass-panel border-sky-500/30 px-2 py-0.5 rounded">
                           {(log.digitalHash || "sha256:7f8e9a4b2c1d").slice(0, 24)}...
                         </span>
                       </td>
@@ -327,19 +323,19 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
 
       {/* Tab 3: Statutory RBAC Matrix (canonical functionals × dept tenants) */}
       {activeTab === "matrix" && (
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
+        <div className="glass-panel border-white/10 rounded-2xl p-6 shadow-xl space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="text-xs font-mono font-bold text-slate-200 uppercase tracking-wider">
+            <h3 className="text-xs font-mono font-bold text-on-surface uppercase tracking-wider">
               Statutory Law Enforcement Access Control Matrix (TRINETRA Standard)
             </h3>
-            <span className="text-[10px] font-mono text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded">
+            <span className="text-[10px] font-mono text-primary glass-panel border border-primary/20 px-2 py-0.5 rounded">
               CBI / NIA / CID / POLICE × ADMIN-LEAD-CYBER-FORENSIC-FIELD
             </span>
           </div>
 
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs font-mono">
-              <thead className="bg-slate-950 text-slate-400 border-b border-slate-800">
+              <thead className="glass-strong text-on-surface-variant border-b border-white/10">
                 <tr>
                   <th className="py-3 px-4">Role Designation</th>
                   <th className="py-3 px-4 text-center">Manage Users & Cases</th>
@@ -349,7 +345,7 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
                   <th className="py-3 px-4 text-center">Sign Charge-Sheet Dossier</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800">
+              <tbody className="divide-y divide-white/5">
                 {[
                   {
                     role: "*_ADMIN (dept-scoped)",
@@ -397,10 +393,10 @@ export const InvestigatorRbacHub: React.FC<InvestigatorRbacHubProps> = ({
                     signDossier: false,
                   },
                 ].map((row, idx) => (
-                  <tr key={idx} className="hover:bg-slate-850">
+                  <tr key={idx} className="hover:bg-surface-container">
                     <td className="py-3.5 px-4">
-                      <div className="font-bold text-slate-200">{row.role}</div>
-                      <div className="text-[10px] text-slate-500">{row.desc}</div>
+                      <div className="font-bold text-on-surface">{row.role}</div>
+                      <div className="text-[10px] text-on-surface-variant">{row.desc}</div>
                     </td>
                     <td className="py-3.5 px-4 text-center">{row.manageUsers ? "🟢 YES" : "🔴 NO"}</td>
                     <td className="py-3.5 px-4 text-center">{row.copilot ? "🟢 YES" : "🔴 NO"}</td>

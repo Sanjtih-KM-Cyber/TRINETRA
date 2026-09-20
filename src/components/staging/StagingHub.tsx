@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { stagingApi } from "../../services/api";
+import { isAdmin, isLead } from "../../data/roles";
 import { CaseDataset } from "../../types";
 import { IngestTab } from "./IngestTab";
 import { ApprovalQueueTab } from "./ApprovalQueueTab";
@@ -15,8 +16,6 @@ interface StagingHubProps {
 }
 
 type SubTab = "ingest" | "queue" | "pool" | "transfer";
-
-const LEAD_ROLES = ["ADMIN", "LEAD_INVESTIGATOR", "CBI_OFFICER", "NIA_OFFICER", "ED_OFFICER", "NCB_OFFICER", "IB_OFFICER", "FIU_ANALYST"];
 
 export const StagingHub: React.FC<StagingHubProps> = ({ currentCase, readOnly, signal }) => {
   const { user } = useAuth();
@@ -45,13 +44,18 @@ export const StagingHub: React.FC<StagingHubProps> = ({ currentCase, readOnly, s
     refresh();
   }, [refresh, signal]);
 
-  const canReview = !!user && LEAD_ROLES.includes(user.role);
-  const canPropose = !!user && ["ADMIN", "LEAD_INVESTIGATOR", "CBI_OFFICER", "NIA_OFFICER", "ED_OFFICER", "NCB_OFFICER", "IB_OFFICER"].includes(user.role);
-  const canDecide = !!user && ["ADMIN", "LEAD_INVESTIGATOR", "CBI_OFFICER", "NIA_OFFICER", "ED_OFFICER", "NCB_OFFICER", "IB_OFFICER", "FIU_ANALYST", "CERT_ANALYST"].includes(user.role);
+  // Canonical roles: reviewers are Admins + Leads; every functional (incl. Leads)
+  // may submit exhibits/files — uploads land in staging for Lead review.
+  const canReview = !!user && (isAdmin(user.role) || isLead(user.role));
+  const canIngest = !!user && (isAdmin(user.role) || isLead(user.role) || user.role.endsWith("_FIELD") || user.role.endsWith("_FORENSIC") || user.role.endsWith("_CYBER"));
+  const canPropose = canReview;
+  const canDecide = canReview;
 
   const tabs: Array<{ id: SubTab; label: string; icon: React.ReactNode; badge?: number; dot?: boolean }> = [
     { id: "queue", label: "Approval Queue", icon: <ListChecks className="w-4 h-4" />, badge: counts.pending, dot: counts.pending > 0 },
-    { id: "ingest", label: "Ingest", icon: <Upload className="w-4 h-4" />, badge: counts.batches },
+    // Ingest is open to every functional (PDF/DOC/images/audio/video included);
+    // SAHAYAK remains the guided path for Leads, this is the direct one.
+    ...(canIngest ? [{ id: "ingest" as SubTab, label: "Ingest", icon: <Upload className="w-4 h-4" />, badge: counts.batches }] : []),
     { id: "pool", label: "Innocent Pool", icon: <Scale className="w-4 h-4" />, badge: counts.pool },
     { id: "transfer", label: "Transfer", icon: <ArrowRightLeft className="w-4 h-4" />, badge: counts.transfers, dot: counts.transfers > 0 },
   ];

@@ -24,6 +24,7 @@ import type {
   DBMeshPeer,
   DBRequisition,
   DBDossierSignature,
+  DBCollabRequest,
 } from "./db";
 
 function eqFilter(query: Record<string, any>): Record<string, any> {
@@ -384,6 +385,49 @@ export async function createMongoBackend(uri: string, dbName: string): Promise<a
       find: async (query: { case_id?: string } = {}) =>
         (await C("dossier_signatures").find(eqFilter(query)).sort({ signed_at: -1 }).toArray()) as unknown as DBDossierSignature[],
       ...idHelpers<DBDossierSignature>("dossier_signatures"),
+    },
+
+    collab_requests: {
+      find: async (query: { from_state?: string; to_state?: string; status?: string } = {}) =>
+        (await C("collab_requests").find(eqFilter(query)).sort({ requested_at: -1 }).toArray()) as unknown as DBCollabRequest[],
+      ...idHelpers<DBCollabRequest>("collab_requests"),
+    },
+
+    // ---- Admin: cascade-delete a case + every case-scoped record ----
+    deleteCaseCascade: async (caseId: string) => {
+      const memberCount = await C("case_members").countDocuments({ case_id: caseId });
+      const evidenceCount = await C("evidence").countDocuments({ case_id: caseId });
+      const caseScoped = [
+        "case_members",
+        "evidence",
+        "entities",
+        "relationships",
+        "firs",
+        "cdrs",
+        "financials",
+        "intels",
+        "observations",
+        "investigation_events",
+        "audit_logs",
+        "case_diary",
+        "arrest_memos",
+        "history_sheets",
+        "custody",
+        "charge_sheets",
+        "cyber_incidents",
+        "ingestion_batches",
+        "staged_entities",
+        "staged_links",
+        "innocent_pool",
+        "transfers",
+        "requisitions",
+        "case_access_requests",
+        "dossier_signatures",
+      ];
+      await Promise.all(caseScoped.map((name) => C(name).deleteMany({ case_id: caseId })));
+      await C("cases").deleteOne({ _id: caseId });
+      await C("cases").deleteOne({ id: caseId } as any);
+      return { memberCount, evidenceCount };
     },
   };
 }

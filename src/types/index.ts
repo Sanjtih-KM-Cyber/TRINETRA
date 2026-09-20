@@ -60,8 +60,7 @@ export type InformationCategory =
 export type ReviewState =
   | "CONFIRMED"
   | "NEEDS_REVIEW"
-  | "REJECTED"
-  | "UNCERTAIN";
+  | "REJECTED";
 
 export type AIProcessingEngine =
   | "LOCAL_OFFLINE"
@@ -106,6 +105,8 @@ export interface UserAccount {
   approved_at?: string;
   last_login?: string;
   avatarColor?: string;
+  /** True after admin unblock — workstation locked until rotation. */
+  mustChangePassword?: boolean;
   permissions?: {
     canSignDossier: boolean;
     canConfirmEvidence: boolean;

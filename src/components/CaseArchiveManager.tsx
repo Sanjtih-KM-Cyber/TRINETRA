@@ -152,7 +152,7 @@ export const CaseArchiveManager: React.FC<CaseArchiveManagerProps> = ({
       } catch (err: any) {
         setImportStatus({
           success: false,
-          message: err.message || "Import failed. Only Department Admins may initialize cases from archives.",
+          message: err.message || "Import failed. Only Department Admins and Lead Investigators may initialize cases from archives.",
         });
       } finally {
         setIsImporting(false);

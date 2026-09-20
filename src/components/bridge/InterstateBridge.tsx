@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { caseApi } from "../../services/api";
-import { orgOf } from "../../data/roles";
+import { orgOf, isStatewiseOrg } from "../../data/roles";
 import { KNOWN_STATES } from "../../data/roles";
 import { Share2, Inbox, CheckCircle2, AlertTriangle } from "lucide-react";
 
@@ -23,7 +23,8 @@ export const InterstateBridge: React.FC<InterstateBridgeProps> = ({ caseId, onCh
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const police = !!user && orgOf(user.role) === "POLICE";
+  // Statewise bridge: State Police + CID (every KNOWN_STATE offered).
+  const police = !!user && isStatewiseOrg(orgOf(user.role)) && !!((user as any)?.state);
   const myState = ((user as any)?.state || "").toUpperCase();
   const counterStates = KNOWN_STATES.map((s) => s.code).filter((c) => c !== myState);
 

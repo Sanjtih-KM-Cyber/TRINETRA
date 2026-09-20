@@ -15,6 +15,7 @@ import {
 
 import { callLLMWithSchema, getActiveEngine, stripMarkdownCodeBlocks } from "./llmClient";
 import { GAZETTEER } from "../data/gazetteer";
+import { apiUrl } from "./apiBase";
 
 export interface ExtractionResult {
   nodes: CrimeNetworkNode[];
@@ -441,18 +442,22 @@ export function extractEntitiesRuleBased(
 
 /**
  * Universal Multi-Engine Extraction Pipeline:
- * Supports Local Offline, Groq LPU, and Google Gemini
- * Includes 10-second timeout and bulletproof fallback to rule-based extraction
+ * Supports Local Offline, Groq LPU, and Google Gemini.
+ * With strict=true the model call is authoritative: failures throw instead
+ * of silently falling back, so SAHAYAK-branded flows never present
+ * rule-based output as model output.
  */
 export async function extractEntitiesUniversal(
   text: string,
   fileName = "Case Evidence Document",
-  engine?: AIProcessingEngine
+  engine?: AIProcessingEngine,
+  opts: { strict?: boolean } = {}
 ): Promise<ExtractionResult> {
   const docId = `DOC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const activeEngine = engine || getActiveEngine();
 
   if (activeEngine === "LOCAL_OFFLINE") {
+    if (opts.strict) throw new Error("Strict SAHAYAK extraction requires a live model provider (groq/gemini).");
     return extractEntitiesRuleBased(text, docId, fileName);
   }
 
@@ -500,6 +505,7 @@ Extract all forensic entities and their relationships. Be precise and evidence-b
     );
 
     if (!llmResult.entities || llmResult.entities.length === 0) {
+      if (opts.strict) throw new Error("SAHAYAK model returned no entities for this document.");
       console.warn("LLM returned empty entities, falling back to rule-based extraction");
       return extractEntitiesRuleBased(text, docId, fileName);
     }
@@ -555,6 +561,7 @@ Extract all forensic entities and their relationships. Be precise and evidence-b
       suspiciousSignals: llmResult.suspiciousSignals || [],
     };
   } catch (err) {
+    if (opts.strict) throw err instanceof Error ? err : new Error("SAHAYAK extraction failed.");
     console.warn(`AI extraction (${activeEngine}) failed, falling back to local rule engine:`, err);
     return extractEntitiesRuleBased(text, docId, fileName);
   }
@@ -627,51 +634,8 @@ export function parseFinancialCSV(csvText: string, fileName = "Bank_Ledger.csv")
 }
 
 /**
- * AI Copilot Query Service (Proxied via backend /api/copilot with local intelligence fallback)
- */
-export async function queryCopilotWithGemini(
-  query: string,
-  nodes: CrimeNetworkNode[],
-  links: CrimeNetworkLink[],
-  patterns: any[],
-  communities: any[]
-): Promise<{ answer: string; suggestedNodeIds?: string[] }> {
-  try {
-    const res = await fetch("/api/copilot", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, contextData: { nodes, links, patterns, communities } }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.reply) {
-        return {
-          answer: data.reply,
-          suggestedNodeIds: data.suggestedNodeIds || [],
-        };
-      }
-    }
-  } catch (err) {
-    console.warn("Copilot API fallback:", err);
-  }
-
-  const topKingpin = nodes.find((n) => n.isKingpinCandidate || (n.betweenness || 0) > 0.2);
-  const criticalPatterns = patterns.filter((p: any) => p.severity === "CRITICAL");
-
-  const answer = `Intelligence Copilot Analysis:
-1. **Network Topology**: Active criminal syndicate contains ${nodes.length} mapped entities and ${links.length} evidentiary links across ${communities.length} functional factions.
-2. **Primary High-Value Target (HVT)**: ${topKingpin ? `${topKingpin.label} (Betweenness Centrality: ${topKingpin.betweenness || 0.28}, Threat Risk: ${topKingpin.riskScore}/100)` : "Distributed command cell"}.
-3. **Critical Alerts**: Found ${criticalPatterns.length} critical patterns (${criticalPatterns.map((p: any) => p.title).join("; ")}).
-4. **Actionable IO Recommendation**: Subpoena telecom tower dumps for identified co-location coordinates and initiate Section 102 CrPC account freezes on highlighted Hawala layering handles.`;
-
-  return {
-    answer,
-    suggestedNodeIds: topKingpin ? [topKingpin.id] : [],
-  };
-}
-
-/**
- * Court Dossier Generator Service (Proxied via backend /api/dossier with local deterministic fallback)
+ * Court Dossier Generator Service (SAHAYAK synthesis via backend /api/dossier).
+ * Honest errors only — no local template fallback.
  */
 export async function generateDossierWithGemini(
   currentCase: any,
@@ -680,59 +644,32 @@ export async function generateDossierWithGemini(
   patterns: any[],
   communities: any[]
 ): Promise<any> {
+  const token =
+    typeof localStorage !== "undefined" ? localStorage.getItem("crim_intel_token") : null;
+  let vpn: string | null = null;
   try {
-    const res = await fetch("/api/dossier", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        caseDataset: currentCase,
-        nodes,
-        links,
-        patterns,
-        communities,
-      }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.dossier) return data.dossier;
-    }
-  } catch (err) {
-    console.warn("Dossier API fallback:", err);
+    vpn = sessionStorage.getItem("crim_intel_vpn");
+  } catch {
+    vpn = null;
   }
-
-  const kingpins = nodes.filter((n) => n.isKingpinCandidate || n.riskScore >= 80);
-
-  return {
-    caseTitle: currentCase.name || "Special Task Force Syndicate Investigation",
-    caseNumber: currentCase.codeName || "OP-GARUDA-2026",
-    investigatingAgency: currentCase.leadAgency || "State Police Special Task Force",
-    generatedAt: new Date().toISOString(),
-    executiveSummary: `${currentCase.name} is an active multi-jurisdictional organized syndicate file involving ${nodes.length} identified suspects and ${links.length} verified evidentiary connections. Network graph centrality metrics isolate ${kingpins.length} primary Kingpins and ${patterns.length} forensic patterns of fund layering and burner device hopping.`,
-    legalCitations: [
-      "Section 111 Bharatiya Nyaya Sanhita (BNS) - Organized Crime Syndicate",
-      "Section 61 BNS - Criminal Conspiracy",
-      "Section 65B Indian Evidence Act / BSA - Electronic Records & Hash Verification",
-      "Section 102 Code of Criminal Procedure (CrPC) - Seizure of Illicit Bank Accounts",
-    ],
-    primeSuspects: kingpins.map((k) => ({
-      name: k.label,
-      role: k.role || "Syndicate Handler",
-      riskScore: k.riskScore,
-      betweenness: k.betweenness || 0.25,
-      phone: k.details?.phone,
-      charges: "Conspiracy & Extortion Directives",
-      evidenceSummary: `Identified as high-betweenness controller communicating through proxy conduits with ${k.degree || 3} direct associates.`,
-    })),
-    patternEvidence: patterns.map((p: any) => ({
-      title: p.title,
-      severity: p.severity,
-      explanation: p.description,
-      actionableLead: p.actionableLead,
-    })),
-    officerSignatureBlock: {
-      rank: "Superintendent of Police / Lead IO",
-      agency: currentCase.leadAgency || "Special Investigation Team (SIT)",
-      statement: "I hereby certify under Section 65B that the extracted electronic telemetry and relational graphs represent tamper-evident computational artifacts derived from seized exhibits.",
+  const res = await fetch(apiUrl("/api/dossier"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(vpn ? { "X-VPN-Session": vpn } : {}),
     },
-  };
+    body: JSON.stringify({
+      caseDataset: currentCase,
+      nodes,
+      links,
+      patterns,
+      communities,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.dossier) {
+    throw new Error(data.error || "SAHAYAK dossier synthesis failed.");
+  }
+  return data.dossier;
 }

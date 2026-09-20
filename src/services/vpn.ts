@@ -42,6 +42,8 @@ export function verifyCertificatePin(cert: CertificateInfo): { ok: boolean; reas
   return { ok: true, reason: "Pinned fingerprint match. Gateway identity verified." };
 }
 
+import { apiUrl } from "./apiBase";
+
 export interface VpnAuthResponse {
   success: boolean;
   vpnSession: string;
@@ -60,7 +62,7 @@ export const vpnApi = {
   /** Anonymous tunnel handshake — no identity. Issues the session + OTP for sign-in. */
   async handshake(clientCertPem?: string): Promise<VpnAuthResponse> {
     const vpnSessionHeader = sessionStorage.getItem("crim_intel_vpn") ?? "";
-    const res = await fetch("/api/vpn/handshake", {
+    const res = await fetch(apiUrl("/api/vpn/handshake"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -80,7 +82,7 @@ export const vpnApi = {
 
   async status(): Promise<{ connected: boolean; gateway?: string; cipher?: string; protocol?: string; demo?: boolean }> {
     const vpnSessionHeader = sessionStorage.getItem("crim_intel_vpn") ?? "";
-    const res = await fetch("/api/vpn/status", {
+    const res = await fetch(apiUrl("/api/vpn/status"), {
       headers: vpnSessionHeader ? { "X-VPN-Session": vpnSessionHeader } : {},
     });
     return (await res.json().catch(() => ({ connected: false }))) as {
@@ -91,7 +93,7 @@ export const vpnApi = {
 
   async disconnect(): Promise<void> {
     const vpnSessionHeader = sessionStorage.getItem("crim_intel_vpn") ?? "";
-    await fetch("/api/vpn/disconnect", {
+    await fetch(apiUrl("/api/vpn/disconnect"), {
       method: "POST",
       headers: vpnSessionHeader ? { "X-VPN-Session": vpnSessionHeader } : {},
     }).catch(() => undefined);

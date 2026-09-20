@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import { db, DBUser, DBAccessRequest, DBAuditLog } from "../db";
 import { generateToken, authenticateToken, AuthenticatedRequest } from "../auth";
 import { authLimiter } from "../rateLimits";
-import { REQUESTABLE_ROLES, USER_ROLES, isAdmin, tenureKey, sameTenure } from "../../src/data/roles";
+import { REQUESTABLE_ROLES, USER_ROLES, isAdmin, tenureKey, caseTenureOf, sameTenure } from "../../src/data/roles";
 import crypto from "crypto";
 
 const router = Router();
@@ -28,6 +28,10 @@ router.get("/demo-users", async (req: Request, res: Response) => {
 // Wrong-OTP failure counters per account (lockout after threshold).
 const otpFailures = new Map<string, number>();
 export const OTP_MAX_FAILURES = 5;
+/** Cleared when a department Admin unblocks the officer. */
+export function clearOtpFailures(userId: string): void {
+  otpFailures.delete(userId);
+}
 
 // User Sign In — requires tunnel-handshake OTP bound to the VPN session.
 // Wrong OTPs are counted: OTP_MAX_FAILURES consecutive failures lock the
@@ -147,7 +151,10 @@ router.post("/login", authLimiter, async (req: Request, res: Response) => {
     res.status(403).json({
       error: `Account ${user.status}`,
       status: user.status,
-      message: `Your account has been marked as ${user.status.toLowerCase()}. Access restricted.`,
+      message:
+        user.status === "SUSPENDED"
+          ? "Your account is blocked after repeated wrong OTP attempts. Your department Admin has been notified — you will be intimated here when it is unblocked."
+          : `Your account has been marked as ${user.status.toLowerCase()}. Access restricted.`,
     });
     return;
   }
@@ -179,8 +186,7 @@ router.post("/login", authLimiter, async (req: Request, res: Response) => {
     const tenure = tenureKey(user.role, user.state);
     authorizedCases = allCasesForAuth.filter((c: any) => {
       if (!c?.org || c.org === "UNKNOWN") return true;
-      const ct = c.org === "POLICE" ? `POLICE:${String(c.state || "POLICE").toUpperCase()}` : String(c.org).toUpperCase();
-      return ct === tenure;
+      return caseTenureOf(c) === tenure;
     });
   } else {
     const memberships = await db.case_members.find({ user_id: user._id });
@@ -192,6 +198,7 @@ router.post("/login", authLimiter, async (req: Request, res: Response) => {
 
   res.json({
     token,
+    mustChangePassword: !!(user as any).mustChangePassword,
     user: {
       _id: user._id,
       name: user.name,
@@ -206,6 +213,7 @@ router.post("/login", authLimiter, async (req: Request, res: Response) => {
       created_at: user.created_at,
       last_login: now,
       avatarColor: user.avatarColor,
+      mustChangePassword: !!(user as any).mustChangePassword,
     },
     authorized_cases: authorizedCases,
   });
@@ -355,8 +363,7 @@ router.get("/me", authenticateToken, async (req: AuthenticatedRequest, res: Resp
     const tenure = tenureKey(user.role, user.state);
     authorizedCases = allCasesForMe.filter((c: any) => {
       if (!c?.org || c.org === "UNKNOWN") return true;
-      const ct = c.org === "POLICE" ? `POLICE:${String(c.state || "POLICE").toUpperCase()}` : String(c.org).toUpperCase();
-      return ct === tenure;
+      return caseTenureOf(c) === tenure;
     });
   } else {
     const memberships = await db.case_members.find({ user_id: user._id });
@@ -379,9 +386,96 @@ router.get("/me", authenticateToken, async (req: AuthenticatedRequest, res: Resp
       created_at: user.created_at,
       last_login: user.last_login,
       avatarColor: user.avatarColor,
+      mustChangePassword: !!(user as any).mustChangePassword,
     },
     authorized_cases: authorizedCases,
   });
+});
+
+// Blocked-screen status poll (no password required — identifier only).
+// Lets a locked-out officer keep one screen open: it reports SUSPENDED
+// until the department Admin unblocks, then hands over the one-time
+// temporary password exactly once per identifier match.
+router.post("/account-status", authLimiter, async (req: Request, res: Response) => {
+  const { identifier, email } = req.body || {};
+  const loginId = String(identifier || email || "").trim();
+  if (!loginId) {
+    res.status(400).json({ error: "identifier is required." });
+    return;
+  }
+  const user =
+    (await db.users.findOne({ email: loginId })) ||
+    (await db.users.findOne({ official_id: loginId }));
+  if (!user) {
+    res.status(404).json({ status: "UNKNOWN", message: "No account matches this identifier." });
+    return;
+  }
+  if (user.status === "SUSPENDED") {
+    res.json({
+      status: "SUSPENDED",
+      blocked: true,
+      name: user.name,
+      message: "Your account is still blocked. Your department Admin will unblock it — keep this screen open.",
+    });
+    return;
+  }
+  if ((user as any).mustChangePassword && (user as any).pendingTempPassword) {
+    res.json({
+      status: user.status,
+      blocked: false,
+      unblocked: true,
+      name: user.name,
+      tempPassword: (user as any).pendingTempPassword,
+      mustChangePassword: true,
+      message: "Your account has been unblocked. Sign in with the temporary password below, then set your own.",
+    });
+    return;
+  }
+  res.json({
+    status: user.status,
+    blocked: false,
+    unblocked: user.status === "ACTIVE",
+    name: user.name,
+    mustChangePassword: !!(user as any).mustChangePassword,
+    message:
+      user.status === "ACTIVE"
+        ? "Your account is active — proceed to Officer Sign-In."
+        : `Your account is ${String(user.status).toLowerCase()}.`,
+  });
+});
+
+// First-login rotation after unblock (authenticated with the temp password).
+router.post("/change-password", authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const { newPassword } = (req.body || {}) as { newPassword?: string };
+  if (!newPassword || String(newPassword).length < 6) {
+    res.status(400).json({ error: "newPassword (min 6 chars) is required." });
+    return;
+  }
+  const me = await db.users.findOne({ _id: req.user!._id });
+  if (!me) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+  const salt = await bcrypt.genSalt(10);
+  const password_hash = await bcrypt.hash(String(newPassword), salt);
+  await db.users.updateOne(me._id, {
+    password_hash,
+    mustChangePassword: false,
+    pendingTempPassword: undefined,
+  } as any);
+  await db.audit_logs.insertOne({
+    _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+    timestamp: new Date().toISOString(),
+    user_id: me._id,
+    user_name: me.name,
+    user_role: me.role,
+    action: "AUTH_PASSWORD_ROTATED",
+    details: `Officer ${me.name} rotated the post-unblock temporary password.`,
+    digital_hash: crypto.createHash("sha256").update(`${me._id}:${Date.now()}:ROTATE`).digest("hex"),
+    result: "SUCCESS",
+    ip_address: req.ip || "127.0.0.1",
+  });
+  res.json({ success: true, message: "Password updated. Use your new password for all future sign-ins." });
 });
 
 // Logout

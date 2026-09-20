@@ -54,7 +54,13 @@ export type I18nKey =
   | "appTitle" | "appSubtitle" | "signIn" | "badgeId" | "password"
   | "vpnConnect" | "vpnDisconnect" | "dashboard" | "cases" | "graph"
   | "analytics" | "patterns" | "geo" | "ingest" | "search"
-  | "logout" | "accessGranted" | "authFailed" | "secureTunnel" | "officerCredentials";
+  | "logout" | "accessGranted" | "authFailed" | "secureTunnel" | "officerCredentials"
+  // Workstation shell + shared actions (realtime via useLanguage().t).
+  | "commandOverview" | "graphWorkstation" | "threatPatterns" | "geoTimeline"
+  | "sahayakAi" | "evidenceTriage" | "cyberConsole" | "myWorkspaces"
+  | "searchPlaceholder" | "newCase" | "dossier" | "proceedings" | "staging"
+  | "cyberCell" | "accessRequests" | "allCases" | "migration" | "collaboration"
+  | "cancel" | "save" | "add" | "close" | "language";
 
 type Dict = Record<I18nKey, string>;
 
@@ -79,6 +85,29 @@ const en: Dict = {
   authFailed: "Authentication Failed",
   secureTunnel: "Secure Tunnel",
   officerCredentials: "Officer Credentials",
+  commandOverview: "Command Overview",
+  graphWorkstation: "Graph Workstation",
+  threatPatterns: "Threat Patterns & Leads",
+  geoTimeline: "Geospatial & Timeline",
+  sahayakAi: "SAHAYAK AI",
+  evidenceTriage: "Evidence Triage Queue",
+  cyberConsole: "Cyber Console",
+  myWorkspaces: "My Workspaces",
+  searchPlaceholder: "Search suspects, phones, IMEIs, bank VPAs...",
+  newCase: "New Case",
+  dossier: "Dossier",
+  proceedings: "Proceedings",
+  staging: "Intake Pipeline",
+  cyberCell: "Cyber Cell",
+  accessRequests: "Access Requests",
+  allCases: "All Registered Cases",
+  migration: "Handover & Migration",
+  collaboration: "State Collaboration",
+  cancel: "Cancel",
+  save: "Save",
+  add: "Add",
+  close: "Close",
+  language: "Language",
 };
 
 export const STRINGS: Record<AppLocale, Dict> = {
@@ -109,4 +138,18 @@ export const STRINGS: Record<AppLocale, Dict> = {
 
 export function translate(locale: AppLocale, key: I18nKey): string {
   return STRINGS[locale]?.[key] ?? STRINGS.en[key] ?? key;
+}
+
+// Shell + shared-action translations for the major locales. Remaining
+// locales fall back to the English base via the `{ ...en }` spread above.
+const EXTRA: Partial<Record<AppLocale, Partial<Dict>>> = {
+  hi: { commandOverview: "कमांड अवलोकन", graphWorkstation: "ग्राफ कार्यस्थान", threatPatterns: "खतरा पैटर्न और लीड", geoTimeline: "भू-स्थानिक और समयरेखा", sahayakAi: "सहायक AI", evidenceTriage: "साक्ष्य छंटाई कतार", cyberConsole: "साइबर कंसोल", myWorkspaces: "मेरे कार्यक्षेत्र", searchPlaceholder: "संदिग्ध, फोन, IMEI, बैंक VPA खोजें...", newCase: "नया मामला", dossier: "डोजियर", proceedings: "कार्यवाही", staging: "अंतर्ग्रहण पाइपलाइन", cyberCell: "साइबर सेल", accessRequests: "पहुंच अनुरोध", allCases: "सभी पंजीकृत मामले", migration: "हस्तांतरण और माइग्रेशन", collaboration: "राज्य सहयोग", cancel: "रद्द करें", save: "सहेजें", add: "जोड़ें", close: "बंद करें", language: "भाषा" },
+  mr: { commandOverview: "कमांड आढावा", graphWorkstation: "आलेख कार्यस्थान", threatPatterns: "धोका नमुने आणि लीड", geoTimeline: "भू-स्थानिक आणि कालरेषा", sahayakAi: "सहायक AI", evidenceTriage: "पुरावा चाळणी रांग", cyberConsole: "सायबर कन्सोल", myWorkspaces: "माझी कार्यक्षेत्रे", searchPlaceholder: "संशयित, फोन, IMEI, बँक VPA शोधा...", newCase: "नवीन प्रकरण", dossier: "डोजियर", proceedings: "कार्यवाही", staging: "अंतर्ग्रहण पाइपलाइन", cyberCell: "सायबर सेल", accessRequests: "प्रवेश विनंत्या", allCases: "सर्व नोंदणीकृत प्रकरणे", migration: "हस्तांतरण आणि स्थलांतर", collaboration: "राज्य सहकार्य", cancel: "रद्द करा", save: "जतन करा", add: "जोडा", close: "बंद करा", language: "भाषा" },
+  kn: { commandOverview: "ಕಮಾಂಡ್ ಅವಲೋಕನ", graphWorkstation: "ಗ್ರಾಫ್ ಕಾರ್ಯಸ್ಥಳ", threatPatterns: "ಬೆದರಿಕೆ ಮಾದರಿಗಳು ಮತ್ತು ಲೀಡ್‌ಗಳು", geoTimeline: "ಭೂ-ಸ್ಥಳ ಮತ್ತು ಕಾಲರೇಖೆ", sahayakAi: "ಸಹಾಯಕ್ AI", evidenceTriage: "ಸಾಕ್ಷ್ಯ ವಿಂಗಡಣಾ ಸರತಿ", cyberConsole: "ಸೈಬರ್ ಕನ್ಸೋಲ್", myWorkspaces: "ನನ್ನ ಕಾರ್ಯಕ್ಷೇತ್ರಗಳು", searchPlaceholder: "ಶಂಕಿತರು, ಫೋನ್‌ಗಳು, IMEI, ಬ್ಯಾಂಕ್ VPA ಹುಡುಕಿ...", newCase: "ಹೊಸ ಪ್ರಕರಣ", dossier: "ದಸ್ತಾವೇಜು", proceedings: "ಕ್ರಮಗಳು", staging: "ಒಳಸೇರ್ಪಡೆ ಪೈಪ್‌ಲೈನ್", cyberCell: "ಸೈಬರ್ ಸೆಲ್", accessRequests: "ಪ್ರವೇಶ ವಿನಂತಿಗಳು", allCases: "ಎಲ್ಲಾ ನೋಂದಾಯಿತ ಪ್ರಕರಣಗಳು", migration: "ಹಸ್ತಾಂತರ ಮತ್ತು ವಲಸೆ", collaboration: "ರಾಜ್ಯ ಸಹಯೋಗ", cancel: "ರದ್ದುಮಾಡಿ", save: "ಉಳಿಸಿ", add: "ಸೇರಿಸಿ", close: "ಮುಚ್ಚಿ", language: "ಭಾಷೆ" },
+  ta: { commandOverview: "கட்டளை கண்ணோட்டம்", graphWorkstation: "வரைபட பணியிடம்", threatPatterns: "அச்சுறுத்தல் வடிவங்கள்", geoTimeline: "புவி-இட & காலவரிசை", sahayakAi: "சஹாயக் AI", evidenceTriage: "சான்று வரிசை", cyberConsole: "சைபர் கன்சோல்", myWorkspaces: "எனது பணியிடங்கள்", searchPlaceholder: "சந்தேகநபர்கள், தொலைபேசி, IMEI தேடுக...", newCase: "புதிய வழக்கு", dossier: "ஆவணம்", proceedings: "நடவடிக்கைகள்", staging: "உள்வாங்கு வரிசை", cyberCell: "சைபர் பிரிவு", accessRequests: "அணுகல் கோரிக்கைகள்", allCases: "அனைத்து வழக்குகள்", migration: "ஒப்படைப்பு & இடமாற்றம்", collaboration: "மாநில ஒத்துழைப்பு", cancel: "ரத்து", save: "சேமி", add: "சேர்", close: "மூடு", language: "மொழி" },
+  te: { commandOverview: "కమాండ్ అవలోకనం", graphWorkstation: "గ్రాఫ్ కార్యస్థలం", threatPatterns: "ముప్పు నమూనాలు", geoTimeline: "భౌగోళిక & కాలరేఖ", sahayakAi: "సహాయక్ AI", evidenceTriage: "సాక్ష్యం క్యూ", cyberConsole: "సైబర్ కన్సోల్", myWorkspaces: "నా కార్యస్థలాలు", searchPlaceholder: "అనుమానితులు, ఫోన్లు, IMEI వెతకండి...", newCase: "కొత్త కేసు", dossier: "దస్తావేజు", proceedings: "చర్యలు", staging: "స్వీకరణ పైప్‌లైన్", cyberCell: "సైబర్ సెల్", accessRequests: "ప్రవేశ అభ్యర్థనలు", allCases: "అన్ని కేసులు", migration: "అప్పగింత & బదిలీ", collaboration: "రాష్ట్ర సహకారం", cancel: "రద్దు", save: "సేవ్", add: "జోడించు", close: "మూసివేయి", language: "భాష" },
+  bn: { commandOverview: "কমান্ড ওভারভিউ", graphWorkstation: "গ্রাফ কর্মক্ষেত্র", threatPatterns: "হুমকি প্যাটার্ন ও লিড", geoTimeline: "ভূ-স্থান ও সময়রেখা", sahayakAi: "সহায়ক AI", evidenceTriage: "প্রমাণ সারি", cyberConsole: "সাইবার কনসোল", myWorkspaces: "আমার কর্মক্ষেত্র", searchPlaceholder: "সন্দেহভাজন, ফোন, IMEI খুঁজুন...", newCase: "নতুন মামলা", dossier: "ডোজিয়ার", proceedings: "কার্যবিবরণী", staging: "অন্তর্ভুক্তি পাইপলাইন", cyberCell: "সাইবার সেল", accessRequests: "অ্যাক্সেস অনুরোধ", allCases: "সমস্ত মামলা", migration: "হস্তান্তর ও মাইগ্রেশন", collaboration: "রাজ্য সহযোগিতা", cancel: "বাতিল", save: "সংরক্ষণ", add: "যোগ", close: "বন্ধ", language: "ভাষা" },
+};
+for (const [loc, dict] of Object.entries(EXTRA)) {
+  Object.assign(STRINGS[loc as AppLocale], dict);
 }

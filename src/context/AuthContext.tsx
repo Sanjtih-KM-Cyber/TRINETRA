@@ -8,12 +8,14 @@ interface AuthContextType {
   token: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  mustChangePassword: boolean;
   authorizedCases: any[];
   login: (identifier: string, pass: string, otp?: string) => Promise<void>;
   logout: () => Promise<void>;
   requestAccess: (formData: any) => Promise<{ success: boolean; message: string }>;
   refreshUser: () => Promise<void>;
   refreshAuthorizedCases: () => Promise<void>;
+  clearMustChangePassword: () => void;
   realtimeNotification: RealtimeCaseUpdate | null;
   clearNotification: () => void;
 }
@@ -25,6 +27,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [token, setToken] = useState<string | null>(getStoredToken());
   const [authorizedCases, setAuthorizedCases] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [mustChangePassword, setMustChangePassword] = useState<boolean>(false);
   const [realtimeNotification, setRealtimeNotification] = useState<RealtimeCaseUpdate | null>(null);
 
   const refreshAuthorizedCases = useCallback(async () => {
@@ -48,6 +51,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const res = await authApi.getMe();
       setUser(res.user);
+      setMustChangePassword(!!(res.user as any)?.mustChangePassword);
       setAuthorizedCases(res.authorized_cases || []);
     } catch (err: any) {
       console.warn("Auth check failed:", err.message);
@@ -82,6 +86,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const res = await authApi.login(identifier, pass, otp);
       setUser(res.user);
       setToken(res.token);
+      setMustChangePassword(!!(res as any).mustChangePassword || !!(res.user as any)?.mustChangePassword);
       setAuthorizedCases(res.authorized_cases || []);
     } finally {
       setIsLoading(false);
@@ -107,6 +112,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const clearNotification = () => setRealtimeNotification(null);
+  const clearMustChangePassword = useCallback(() => setMustChangePassword(false), []);
 
   return (
     <AuthContext.Provider
@@ -115,12 +121,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         token,
         isAuthenticated: !!user && user.status === "ACTIVE",
         isLoading,
+        mustChangePassword,
         authorizedCases,
         login,
         logout,
         requestAccess,
         refreshUser,
         refreshAuthorizedCases,
+        clearMustChangePassword,
         realtimeNotification,
         clearNotification,
       }}

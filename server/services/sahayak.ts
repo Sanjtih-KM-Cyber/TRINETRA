@@ -31,53 +31,72 @@ export interface SahayakAnswer {
   sources: string[];
 }
 
+const slice = (v: any, n: number) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+
 async function loadCaseContext(caseId?: string): Promise<{ summary: string; exhibits: string[] }> {
   if (!caseId) return { summary: "No case context.", exhibits: [] };
-  const [entities, relationships, firs, evidence, diary] = await Promise.all([
+  const [entities, relationships, firs, evidence, diary, cdrs, financials, intels] = await Promise.all([
     db.entities.find({ case_id: caseId }),
     db.relationships.find({ case_id: caseId }),
     db.firs.find(caseId),
     db.evidence.find({ case_id: caseId }),
     db.case_diary.find(caseId),
+    db.cdrs.find(caseId).catch(() => [] as any[]),
+    db.financials.find(caseId).catch(() => [] as any[]),
+    db.intels.find(caseId).catch(() => [] as any[]),
   ]);
-  const top = [...entities].sort((a, b) => (b.riskScore || 0) - (a.riskScore || 0)).slice(0, 12);
-  const summary = [
-    `Entities: ${entities.length} (${top.map((e) => `${e.label} [${e.type}]`).join("; ") || "none"})`,
-    `Links: ${relationships.length} (${relationships.slice(0, 10).map((r) => `${r.source}-[${r.relationType}]-${r.target}`).join("; ") || "none"})`,
-    `FIRs: ${firs.map((f: any) => `${f.firNumber} (${(f.sections || []).join(", ")})`).join("; ") || "none"}`,
-    `Exhibits: ${evidence.map((e: any) => `${e.file_name} [${e.status}]`).join("; ") || "none"}`,
-    `Evidence dates: ${evidence.map((e: any) => `${e.file_name}@${String(e.uploaded_at || "").slice(0, 10)}`).join("; ") || "none"}`,
-    `Diary entries: ${diary.length}`,
-  ].join("\n");
-  return { summary, exhibits: evidence.map((e: any) => e.file_name) };
-}
+  const top = [...entities].sort((a, b) => (b.riskScore || 0) - (a.riskScore || 0)).slice(0, 15);
+  const topLinks = [...relationships].slice(0, 12);
 
-function deterministicAnswer(question: string, caseSummary: string, hits: LegalHit[]): Omit<SahayakAnswer, "provider" | "llmUsed" | "sources"> {
-  const q = question.toLowerCase();
-  const cites = hits.slice(0, 4).map((h) => `${h.title} — ${h.snippet.slice(0, 140)}`);
-  const actions: string[] = [];
-  let body: string;
-
-  if (/bail|remand|custody|167|437|438|439/.test(q)) {
-    body = `**Custody & Bail Assessment (rules engine + retrieved law):**\n\n${caseSummary}\n\nApplicable provisions retrieved:\n${hits.map((h) => `- ${h.title}: ${h.snippet}`).join("\n") || "- No direct provision match; consult the Statutes tab."}\n\nVerify the 15/60/90-day clocks in the Custody Tracker before advising.`;
-    actions.push("Open the Custody Tracker and check auto-alerts", "File bail plea from the tracker with court + date");
-  } else if (/charge|challan|173|193|evidence|exhibit|65b|certificate/.test(q)) {
-    body = `**Charge-Sheet & Evidence Assessment:**\n\n${caseSummary}\n\nRetrieved law:\n${hits.map((h) => `- ${h.title}: ${h.snippet}`).join("\n") || "-"}\n\nEnsure every electronic exhibit carries a BSA Sec 63 / IEA 65B certificate hash before filing.`;
-    actions.push("Generate the Sec 173 draft from the Charge Sheet tab", "Attach Annexures A–Z with hashes");
-  } else if (/arrest|seize|memo|41|102|warrant/.test(q)) {
-    body = `**Arrest / Seizure Compliance Check:**\n\n${caseSummary}\n\nRetrieved law:\n${hits.map((h) => `- ${h.title}: ${h.snippet}`).join("\n") || "-"}\n\nConfirm grounds recorded, witnesses attested, rights read and nominee intimated before filing the memo.`;
-    actions.push("Draw the memo from Investigation Proceedings", "Affix Aadhaar e-sign with Verhoeff validation");
-  } else {
-    body = `**Case Analysis (rules engine + retrieved law):**\n\n${caseSummary}\n\n${hits.length > 0 ? `Retrieved law:\n${hits.map((h) => `- ${h.title}: ${h.snippet}`).join("\n")}` : "No statute matched the query directly — try section numbers (e.g. 167, 65B, 21 NDPS)."}`;
-    actions.push("Review staged entities in the Approval Queue", "Cross-check with the Evidence Links tab");
+  // Exhibit content budget: ~3k chars each, 12k total — the model reasons
+  // over actual file text, never just file names.
+  let textBudget = 12000;
+  const exhibitBlocks: string[] = [];
+  for (const e of evidence as any[]) {
+    if (textBudget <= 0) {
+      exhibitBlocks.push(`- ${e.file_name} [${e.status}] (content truncated — budget exhausted)`);
+      continue;
+    }
+    const take = Math.min(3000, textBudget);
+    const raw = slice(e.raw_text, take);
+    textBudget -= raw.length;
+    exhibitBlocks.push(
+      `- ${e.file_name} [${e.status}]${e.summary ? ` — ${slice(e.summary, 300)}` : ""}${raw ? `\n  TEXT: ${raw}` : " (no extractable text — sealed container)"}`
+    );
   }
-  return { answer: body, citations: cites, confidence: 0.78, recommendedActions: actions };
+
+  const firBlocks = (firs as any[]).slice(0, 4).map(
+    (f: any) =>
+      `- FIR ${f.firNumber || f.id} (${String(f.date || "").slice(0, 10)}; ${f.policeStation || ""}): sections [${(f.sections || []).join(", ")}]; complainant: ${slice(f.complainant, 120)}; accused: ${slice((f.accused || []).join(", "), 200)}; narrative: ${slice(f.briefNarrative, 600)}`
+  );
+
+  const intelBlocks = (intels as any[]).slice(0, 5).map(
+    (i: any) => `- Intel ${String(i.date || "").slice(0, 10)} (${i.sourceType || ""}, ${i.location || ""}, reliability ${i.reliabilityScore ?? "?"}): ${slice(i.description || i.sanitizedVersion, 400)}`
+  );
+
+  const diaryBlocks = (diary as any[]).slice(-8).map(
+    (d: any) => `- Diary No.${d.diaryNo} (${String(d.created_at || d.date || "").slice(0, 10)}): ${slice(`${d.proceedings || ""} ${d.actionTaken || ""}`, 300)}`
+  );
+
+  const finTotal = (financials as any[]).reduce((s, f: any) => s + (Number(f.amount) || 0), 0);
+  const finTop = [...(financials as any[])].sort((a: any, b: any) => (Number(b.amount) || 0) - (Number(a.amount) || 0)).slice(0, 3);
+
+  const summary = [
+    `Entities (${entities.length}): ${top.map((e) => `${e.label} [${e.type}; role=${e.role || "?"}; risk=${e.riskScore ?? "?"}]`).join("; ") || "none"}`,
+    `Links (${relationships.length}): ${topLinks.map((r) => `${r.source}-[${r.relationType}]-${r.target}`).join("; ") || "none"}`,
+    `FIRs (${(firs as any[]).length}):\n${firBlocks.join("\n") || "none"}`,
+    `Exhibits (${(evidence as any[]).length}):\n${exhibitBlocks.join("\n") || "none"}`,
+    `CDRs: ${(cdrs as any[]).length} records`,
+    `Financials: ${(financials as any[]).length} transfers, total ₹${finTotal.toLocaleString("en-IN")}${finTop.length ? `; top: ${finTop.map((f: any) => `${f.senderName || f.senderAcc}→${f.receiverName || f.receiverAcc} ₹${Number(f.amount).toLocaleString("en-IN")}`).join("; ")}` : ""}`,
+    `Intel (${(intels as any[]).length}):\n${intelBlocks.join("\n") || "none"}`,
+    `Diary (${(diary as any[]).length} entries, latest):\n${diaryBlocks.join("\n") || "none"}`,
+  ].join("\n");
+  return { summary, exhibits: (evidence as any[]).map((e: any) => e.file_name) };
 }
 
 /**
  * SAHAYAK ask pipeline: case retrieval + legal-corpus retrieval, then a real
- * LLM call when a provider is reachable; deterministic synthesis otherwise
- * (always labelled via llmUsed so the UI never implies a model spoke).
+ * model call. No fabricated fallback — provider failures surface as errors.
  */
 export async function sahayakAsk(
   caseId: string | undefined,
@@ -92,7 +111,14 @@ export async function sahayakAsk(
   const adhoc = (opts.adhocContext || "").slice(0, 12000);
   const systemMsg: ChatMessage = {
     role: "system",
-    content: "You are SAHAYAK, a law-enforcement investigation assistant for Indian criminal procedure. Answer strictly from the provided case context and retrieved legal provisions. Every answer MUST state the exact section numbers involved (e.g. Sec 167, Sec 65B, Sec 41A, Sec 438, Sec 21 NDPS) and the relevant exhibit file names in the answer body itself — never paraphrase section numbers away. Cite provision IDs (e.g. CRPC-167) and exhibit names. Respond in JSON: {\"answer\": \"markdown\", \"citations\": [\"...\"], \"confidence\": 0.0-1.0, \"recommendedActions\": [\"...\"]}. Never invent case facts.",
+    content: [
+      "You are SAHAYAK, a senior fellow investigating officer assisting a colleague on a live Indian criminal case.",
+      "Write like a sharp colleague, not a librarian: lead with what matters, reason from the evidence in front of you, flag contradictions and gaps, and give ownable next steps.",
+      "Ground every claim in the CASE CONTEXT below (exhibit text, FIRs, entities, links, CDR/financial aggregates, intel, diary). Never invent names, dates, amounts, or confessions. If the context is thin, say exactly what is missing and which register/database/witness would fill it — never tell the officer to 'retrieve the full content' of an exhibit whose text is already provided above; USE that text.",
+      "Structure the markdown answer as: 1) Bottom line (2-3 sentences). 2) What the evidence actually shows (cite exhibit file names + FIR numbers + dates inline). 3) Applicable law with exact sections (e.g. Sec 376 IPC / BNS 63-70, Sec 302 IPC / BNS 103, Sec 65B IEA / Sec 63 BSA, Sec 41A BNSS) and why each fits or does not yet fit. 4) Gaps & contradictions. 5) Next steps with owner and legal basis. End with ONE clarifying question when it would change the advice.",
+      "Every answer MUST name exact section numbers and exhibit file names in the body. Cite provision IDs (e.g. CRPC-167) in citations.",
+      'Respond in JSON only: {"answer": "markdown", "citations": ["..."], "confidence": 0.0-1.0, "recommendedActions": ["..."]}.',
+    ].join(" "),
   };
   const userMsg: ChatMessage = {
     role: "user",
@@ -120,6 +146,8 @@ export async function sahayakAsk(
     }
   }
 
+  // No fabricated fallback: if the model is unreachable the officer gets an
+  // explicit error, never mock analysis.
   try {
     const response = await callLLM([systemMsg, userMsg], SAHAYAK_LLM_TIMEOUT_MS);
     const parsed = JSON.parse(response.content);
@@ -128,13 +156,13 @@ export async function sahayakAsk(
       citations: Array.isArray(parsed.citations) ? parsed.citations.map(String) : hits.map((h) => h.title),
       confidence: Number(parsed.confidence) || 0.85,
       recommendedActions: Array.isArray(parsed.recommendedActions) ? parsed.recommendedActions.map(String) : [],
-      provider,
+      provider: response.provider ? `${response.provider}${response.model ? `/${response.model}` : ""}` : provider,
       llmUsed: true,
       sources: exhibits,
     };
-  } catch {
-    const d = deterministicAnswer(question, summary, hits);
-    return { ...d, provider: `${provider} (unreachable — rules engine)`, llmUsed: false, sources: exhibits };
+  } catch (err: any) {
+    const reason = err instanceof Error ? err.message : "SAHAYAK model unreachable.";
+    throw Object.assign(new Error(`SAHAYAK (${provider}) unavailable: ${reason}. Check LLM_PROVIDER/GROQ_API_KEYS/GEMINI_API_KEYS and retry — no offline answer is fabricated.`), { status: 502 });
   }
 }
 
@@ -226,36 +254,50 @@ export async function sahayakTranslate(
     const response = await callLLM(messages, SAHAYAK_LLM_TIMEOUT_MS);
     const parsed = JSON.parse(response.content);
     if (!parsed.translated) throw new Error("empty");
-    return { translated: String(parsed.translated), provider };
+    return { translated: String(parsed.translated), provider: response.provider || provider };
   } catch {
-    const err: any = new Error(`Translation needs a live language model (active provider '${provider}' unreachable). Configure Groq/Gemini or local Ollama, or retry from the provider health panel.`);
+    const err: any = new Error(`Translation needs a live language model (active provider '${provider}' unreachable). Configure Groq/Gemini keys or local Ollama, or retry from the provider health panel.`);
     err.status = 503;
     throw err;
   }
 }
 
+const BRIEF_SYSTEM = (langDirective: string) => [
+  "You are SAHAYAK, drafting an exhaustive case brief for a Lead Investigator from a case document.",
+  "Write a complete, in-depth narrative — a story of the document that keeps even minute details intact:",
+  "## Document identity (what it is, court/authority, date, reference numbers)",
+  "## Parties and appearances (every name with role, verbatim)",
+  "## Facts and chronology (full sequence of events with dates)",
+  "## Orders, directions and timelines (each direction with who must do what by when)",
+  "## Figures and provisions (every amount, statistic, section and exhibit reference, exact)",
+  "## Why it matters to the investigation (2-4 lines tying the document to actionable next steps).",
+  "Rules: keep every name, number, date, amount and section reference EXACT as in the source — never round, shorten or paraphrase figures. Markdown headings (##) and short paragraphs. Comprehensive, not compressed: this brief stands in for reading the whole file.",
+  langDirective,
+  'Respond in JSON only: {"summary": "markdown brief"}.',
+].join(" ");
+
 /**
- * Summarize any document text, in any requested language. Live model when
- * reachable (translated summary included); deterministic extractive summary
- * offline. Translation without a model is refused, never faked.
+ * Exhaustive narrative brief of any document text, in any requested
+ * language. Live model when reachable; frequency-ranked extractive brief
+ * offline (works on any narrative — never an empty "nothing to summarize").
+ * Translation without a model is refused, never faked.
  */
 export async function sahayakSummarize(
   text: string,
   targetLang?: string,
   opts: { adapter?: string } = {}
-): Promise<{ summary: string; provider: string; llmUsed: boolean; lines?: string[] }> {
+): Promise<{ summary: string; provider: string; llmUsed: boolean; lines?: string[]; language: string }> {
   const clean = String(text || "").trim();
   if (clean.length < 20) throw new Error("Text is required (minimum 20 characters).");
   const lang = (targetLang || "").trim();
-  const needsTranslation = lang.length > 0 && !/^eng/i.test(lang);
+  const english = lang.length === 0 || /^eng/i.test(lang);
+  const outLang = english ? "the document's own language" : lang;
+  const langDirective = english
+    ? "Write the brief in the document's own language — do not translate."
+    : `Write the ENTIRE brief in ${lang.toUpperCase()} only — every heading, sentence and name explanation in ${lang.toUpperCase()}; keep proper nouns verbatim.`;
 
   const messages: ChatMessage[] = [
-    {
-      role: "system",
-      content: lang
-        ? `Summarize the document for an investigating officer IN ${lang.toUpperCase()}. Return JSON: {"summary": "..."}. Keep every name, number, date and section reference exact; 5-10 sentences.`
-        : "Summarize the document for an investigating officer in its own language. Return JSON: {\"summary\": \"...\"}. Keep every name, number, date and section reference exact; 5-10 sentences.",
-    },
+    { role: "system", content: BRIEF_SYSTEM(langDirective) },
     { role: "user", content: clean.slice(0, 12000) },
   ];
 
@@ -264,7 +306,7 @@ export async function sahayakSummarize(
     if (mesh) {
       try {
         const parsed = JSON.parse(mesh.content);
-        if (parsed.summary) return { summary: String(parsed.summary), provider: mesh.via, llmUsed: true };
+        if (parsed.summary) return { summary: String(parsed.summary), provider: mesh.via, llmUsed: true, language: outLang };
       } catch {
         /* fall through */
       }
@@ -275,23 +317,58 @@ export async function sahayakSummarize(
     const response = await callLLM(messages, SAHAYAK_LLM_TIMEOUT_MS);
     const parsed = JSON.parse(response.content);
     if (!parsed.summary) throw new Error("empty");
-    return { summary: String(parsed.summary), provider: getActiveProvider(), llmUsed: true };
+    return { summary: String(parsed.summary), provider: response.provider || getActiveProvider(), llmUsed: true, language: outLang };
   } catch (err: any) {
-    if (needsTranslation) {
+    if (!english) {
       const out: any = new Error(
-        `Summary in ${lang} needs a live language model (active provider '${getActiveProvider()}' unreachable). Showing the original-language extract instead is available without a model.`
+        `Summary in ${lang} needs a live language model (active provider '${getActiveProvider()}' unreachable). Showing the original-language brief instead is available without a model.`
       );
       out.status = 503;
       throw out;
     }
     const { extractiveSummary } = await import("./docIntel");
-    const ext = extractiveSummary(clean, 6);
+    const ext = extractiveSummary(clean, 10);
     return {
       summary: ext.summary,
       provider: "extractive (offline rules engine)",
       llmUsed: false,
       lines: ext.lines,
+      language: outLang,
     };
+  }
+}
+
+/**
+ * INTAKE PRE-READ — reads a whole staged document and returns an
+ * exhaustive narrative brief for the Lead, before review begins.
+ * Never throws: returns null when no model is live (caller marks the
+ * batch un-briefed and moves on). Used fire-and-forget at ingest time.
+ */
+export async function generateIntakeBrief(
+  text: string,
+  fileName?: string
+): Promise<{ brief: string; provider: string } | null> {
+  const clean = String(text || "").trim();
+  if (clean.length < 200) return null;
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content: [
+        BRIEF_SYSTEM("Write the brief in the document's own language — do not translate."),
+        fileName ? `The source file is "${fileName}".` : "",
+        "Keep it investigation-ready: a Lead Investigator who never opens the raw file must still be able to act on this brief.",
+      ].join(" "),
+    },
+    { role: "user", content: clean.slice(0, 12000) },
+  ];
+  try {
+    const response = await callLLM(messages, SAHAYAK_LLM_TIMEOUT_MS);
+    const parsed = JSON.parse(response.content);
+    const brief = String(parsed.summary || "").trim();
+    if (brief.length < 100) return null;
+    return { brief, provider: response.provider || getActiveProvider() };
+  } catch {
+    return null;
   }
 }
 
@@ -359,7 +436,7 @@ export async function sahayakChargeAssist(
     return {
       legalOpinion,
       polishedFacts: parsed.polished ? String(parsed.polished) : undefined,
-      provider,
+      provider: response.provider || provider,
       llmUsed: true,
       citations: hits.map((h) => h.title),
     };

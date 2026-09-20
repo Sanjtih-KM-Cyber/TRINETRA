@@ -3,6 +3,7 @@ import {
   CriminalRecord,
   ICCTNSAdapter,
 } from "../types";
+import { apiUrl } from "./apiBase";
 
 /**
  * CCTNS/ICJS Adapter — real-data contract only.
@@ -15,10 +16,25 @@ import {
 
 const GATEWAY_BASE = "/api/cctns";
 
+function gatewayHeaders(): Record<string, string> {
+  const token = typeof localStorage !== "undefined" ? localStorage.getItem("crim_intel_token") : null;
+  let vpn: string | null = null;
+  try {
+    vpn = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("crim_intel_vpn") : null;
+  } catch {
+    vpn = null;
+  }
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(vpn ? { "X-VPN-Session": vpn } : {}),
+  };
+}
+
 async function postGateway<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${GATEWAY_BASE}${path}`, {
+  const res = await fetch(apiUrl(`${GATEWAY_BASE}${path}`), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: gatewayHeaders(),
     credentials: "include",
     body: JSON.stringify(body),
   });
@@ -35,9 +51,9 @@ async function postGateway<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function getGateway<T>(path: string): Promise<T> {
-  const res = await fetch(`${GATEWAY_BASE}${path}`, {
+  const res = await fetch(apiUrl(`${GATEWAY_BASE}${path}`), {
     method: "GET",
-    headers: { "Content-Type": "application/json" },
+    headers: gatewayHeaders(),
     credentials: "include",
   });
   if (!res.ok) {

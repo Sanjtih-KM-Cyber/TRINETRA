@@ -6,7 +6,6 @@ import {
   Layers,
   AlertTriangle,
   MapPin,
-  Database,
   FileText,
   Inbox,
   Radar,
@@ -19,6 +18,7 @@ import {
 } from "lucide-react";
 import { CaseDataset, WorkstationTab } from "../types";
 import { isLead, isCyber } from "../data/roles";
+import { useLanguage } from "../context/LanguageContext";
 
 interface SidebarProps {
   currentCase: CaseDataset;
@@ -67,22 +67,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   userRole,
 }) => {
   // Changes.md portals — Lead: overview/graph/patterns/geo/sahayak/staging.
-  // Cyber: ingestion console + cyber cell only.
+  // Cyber: single Cyber Console (ingestion + tasks + correlator + trails).
   const leadView = !!userRole && isLead(userRole);
   const cyberView = !!userRole && isCyber(userRole);
+  const { t } = useLanguage();
   const navItems = cyberView
     ? [
         {
-          id: "ingest" as const,
-          label: "Digital Ingestion Console",
-          subtitle: "CDR Dumps, Tower Logs & OSINT",
-          icon: Database,
-          badge: null,
-        },
-        {
           id: "cyber" as const,
-          label: "Cyber Crime Cell",
-          subtitle: "Tasks, Correlator, Trails, CEIR",
+          label: t("cyberConsole"),
+          subtitle: "Ingestion, Tasks, Correlator, Trails",
           icon: Radar,
           badge: null,
         },
@@ -90,42 +84,42 @@ export const Sidebar: React.FC<SidebarProps> = ({
     : [
         {
           id: "overview" as const,
-          label: "Command Overview",
+          label: t("commandOverview"),
           subtitle: "Executive Intel & Case Team",
           icon: LayoutDashboard,
           badge: null,
         },
         {
           id: "graph" as const,
-          label: "Graph Workstation",
+          label: t("graphWorkstation"),
           subtitle: "Force-Directed Analyst Canvas",
           icon: Network,
           badge: null,
         },
         {
           id: "patterns" as const,
-          label: "Threat Patterns & Leads",
+          label: t("threatPatterns"),
           subtitle: "Burner, Hawala & Convergence",
           icon: AlertTriangle,
           badge: null,
         },
         {
           id: "geo" as const,
-          label: "Geospatial & Timeline",
+          label: t("geoTimeline"),
           subtitle: "GIS Triangulation & Chronology",
           icon: MapPin,
           badge: null,
         },
         {
           id: "sahayak" as const,
-          label: "SAHAYAK AI",
+          label: t("sahayakAi"),
           subtitle: "Investigative Chat + Case RAG",
           icon: Sparkles,
           badge: null,
         },
         {
           id: "staging" as const,
-          label: "Evidence Triage Queue",
+          label: t("evidenceTriage"),
           subtitle: "Review Field, Forensic & Cyber Intake",
           icon: Inbox,
           badge: null,
@@ -151,75 +145,71 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <>
-      {/* Mobile Drawer Backdrop */}
+      {/* Mobile Drawer Scrim — M3 tinted + blurred */}
       {isMobileOpen && (
         <div
-          className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 md:hidden transition-opacity"
+          className="fixed inset-0 m3-scrim z-50 md:hidden"
           onClick={onCloseMobile}
+          aria-hidden="true"
         />
       )}
 
-      {/* Main Sidebar (Desktop fixed + Mobile slide-out drawer) */}
+      {/* M3 Navigation Rail (Desktop) + Modal Navigation Drawer (Mobile) */}
       <aside
-        className={`h-screen bg-slate-950/98 border-r border-slate-800/80 flex flex-col justify-between transition-all duration-300 select-none z-50 shrink-0 ${
-          /* Desktop behavior */
+        className={`h-screen glass-panel flex flex-col justify-between transition-all duration-300 ease-in-out select-none z-50 shrink-0 ${
           isCollapsed ? "md:w-18" : "md:w-72"
         } ${
-          /* Mobile Drawer behavior */
           isMobileOpen
-            ? "fixed inset-y-0 left-0 w-72 shadow-2xl flex translate-x-0"
+            ? "fixed inset-y-0 left-0 w-72 shadow-2xl flex translate-x-0 m3-dialog rounded-r-2xl"
             : "hidden md:flex"
         }`}
+        aria-label="Primary workstation navigation"
       >
-        {/* Top Section: Agency Branding (dept-accented) */}
+        {/* Top Section: Agency Branding (border follows org accent) */}
         <div
-          className="p-4 border-b flex flex-col gap-3"
-          style={{ borderColor: "color-mix(in srgb, var(--dept-accent) 30%, #1e293b)" }}
+          className="p-4 border-b border-outline-variant flex flex-col gap-3"
+          style={{ borderColor: "color-mix(in srgb, var(--dept-accent, #e2c268) 35%, transparent)" }}
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 overflow-hidden">
               <div
-                className="h-10 w-10 shrink-0 rounded-xl border flex items-center justify-center shadow-lg"
-                style={{
-                  borderColor: "color-mix(in srgb, var(--dept-accent) 45%, transparent)",
-                  color: "var(--dept-accent)",
-                  background: "color-mix(in srgb, var(--dept-accent) 12%, transparent)",
-                }}
+                className="h-10 w-10 shrink-0 rounded-lg border border-primary/40 flex items-center justify-center text-primary bg-primary-container/30 transition-all duration-300 ease-in-out"
               >
                 <ShieldAlert className="w-5 h-5" />
               </div>
               {(!isCollapsed || isMobileOpen) && (
                 <div className="truncate">
                   <div className="flex items-center gap-1.5">
-                    <span className="font-mono text-[10px] font-bold text-amber-400 tracking-wider uppercase">
+                    <span className="font-mono text-[10px] font-bold text-primary tracking-[0.12em] uppercase">
                       TRINETRA OS
                     </span>
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse"></span>
                   </div>
-                  <h2 className="text-sm font-bold text-slate-100 truncate tracking-tight">
+                  <h2 className="text-sm font-bold text-on-surface truncate tracking-tight">
                     National Security AI
                   </h2>
                 </div>
               )}
             </div>
 
-            {/* Desktop Collapse Toggle / Mobile Close Button */}
             <div className="flex items-center gap-1">
               {isMobileOpen ? (
                 <button
                   onClick={onCloseMobile}
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 md:hidden"
+                  className="p-1.5 rounded-full text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all duration-300 ease-in-out focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface-container-low md:hidden"
+                  aria-label="Close navigation"
                 >
                   <X className="w-5 h-5" />
                 </button>
               ) : (
                 <button
                   onClick={onToggleCollapse}
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-850 transition-colors hidden md:block"
+                  className="p-1.5 rounded-full text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all duration-300 ease-in-out hidden md:block focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface-container-low"
                   title={isCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}
+                  aria-label={isCollapsed ? "Expand navigation rail" : "Collapse navigation rail"}
                 >
                   <ChevronRight
-                    className={`w-4 h-4 transition-transform duration-200 ${
+                    className={`w-4 h-4 transition-transform duration-300 ease-in-out ${
                       isCollapsed ? "" : "rotate-180"
                     }`}
                   />
@@ -229,10 +219,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        {/* Middle Section: Navigation Modules */}
-        <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1.5 no-scrollbar">
+        {/* Middle Section: M3 Navigation Destinations */}
+        <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1.5 scrollbar-hide">
           {(!isCollapsed || isMobileOpen) && (
-            <div className="px-3 pb-1.5 text-[10px] font-mono font-semibold tracking-wider text-slate-400 uppercase flex items-center justify-between">
+            <div className="px-3 pb-1.5 text-[11px] font-medium tracking-[0.08em] text-on-surface-variant uppercase flex items-center justify-between">
               <span>Intelligence Modules</span>
             </div>
           )}
@@ -244,129 +234,125 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <button
                 key={item.id}
                 onClick={() => handleNavClick(item.id)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all relative group ${
+                aria-current={isActive ? "page" : undefined}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all duration-300 ease-out relative group focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface-container-lowest my-0.5 ${
                   isActive
-                    ? "bg-amber-500/10 text-amber-400 border border-amber-500/30 shadow-sm font-semibold"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-900/70 border border-transparent"
+                    ? "bg-primary-container/40 text-on-surface font-semibold shadow-[inset_0_1px_1px_rgba(255,255,255,0.05),0_2px_8px_rgba(0,0,0,0.1)] border border-primary/20"
+                    : "text-on-surface-variant hover:text-on-surface hover:bg-surface-container border border-transparent"
                 }`}
                 title={isCollapsed && !isMobileOpen ? item.label : undefined}
               >
-                <div
-                  className={`p-1.5 rounded-lg shrink-0 transition-colors ${
+                <span
+                  className={`flex items-center justify-center w-8 h-8 rounded-full shrink-0 transition-all duration-300 ease-in-out ${
                     isActive
-                      ? "bg-amber-500/20 text-amber-300"
-                      : "bg-slate-900 text-slate-400 group-hover:text-slate-200 group-hover:bg-slate-800"
+                      ? "bg-primary text-on-primary"
+                      : "text-on-surface-variant group-hover:text-on-surface"
                   }`}
                 >
                   <Icon className="w-4 h-4" />
-                </div>
+                </span>
 
                 {(!isCollapsed || isMobileOpen) && (
-                  <div className="flex-1 truncate">
+                  <span className="flex-1 truncate">
                     <span className="text-xs tracking-tight truncate block font-medium">
                       {item.label}
                     </span>
-                    <span className="text-[10px] text-slate-400 block truncate font-normal">
+                    <span className="text-[11px] text-on-surface-variant/80 block truncate font-normal">
                       {item.subtitle}
                     </span>
-                  </div>
+                  </span>
                 )}
 
                 {isActive && (
-                  <span className="absolute left-0 top-2 bottom-2 w-1 bg-amber-400 rounded-r"></span>
+                  <span className="absolute left-1 top-2 bottom-2 w-1 bg-primary rounded-full shadow-[0_0_8px_var(--color-primary)]" aria-hidden="true"></span>
                 )}
               </button>
             );
           })}
 
-          {/* Tactical Operations Section */}
           {(!isCollapsed || isMobileOpen) && (
-            <div className="pt-3 pb-1.5 px-3 text-[10px] font-mono font-semibold tracking-wider text-slate-400 uppercase">
+            <div className="pt-3 pb-1.5 px-3 text-[11px] font-medium tracking-[0.08em] text-on-surface-variant uppercase">
               Tactical Operations
             </div>
           )}
 
-
-
-          {/* Judicial Dossier — Lead signatories only (Cyber cannot sign) */}
+          {/* Judicial Dossier — Lead signatories only */}
           {!cyberView && (
           <button
             onClick={handleDossierClick}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-left transition-all border border-amber-500/30 bg-gradient-to-r from-amber-950/40 to-slate-900 text-amber-300 hover:text-amber-200 hover:border-amber-500/50 shadow-sm`}
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-full text-left transition-all duration-300 ease-in-out bg-primary-container/30 text-on-primary-container hover:bg-primary-container/60 border border-primary/20 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface-container-low"
             title="Court-Ready Case Dossier"
           >
-            <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-400 shrink-0">
+            <span className="flex items-center justify-center w-8 h-8 rounded-full bg-primary/20 text-primary shrink-0">
               <FileText className="w-4 h-4" />
-            </div>
+            </span>
             {(!isCollapsed || isMobileOpen) && (
-              <div className="flex-1 truncate">
-                <span className="text-xs font-semibold tracking-tight block">Judicial Dossier</span>
-                <span className="text-[10px] text-slate-400 block truncate font-normal">
+              <span className="flex-1 truncate">
+                <span className="text-xs font-semibold tracking-tight block">{t("dossier")}</span>
+                <span className="text-[11px] text-on-surface-variant block truncate font-normal">
                   Chargesheet & evidence annexure
                 </span>
-              </div>
+              </span>
             )}
           </button>
           )}
 
           {/* Archive & Backup */}
-          {onOpenArchive && (
+          {onOpenArchive && !cyberView && (
             <button
               onClick={handleArchiveClick}
-              className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-left transition-all border border-emerald-500/30 bg-gradient-to-r from-emerald-950/40 to-slate-900 text-emerald-300 hover:text-emerald-200 hover:border-emerald-500/50 shadow-sm`}
+              className="w-full flex items-center gap-3 px-3 py-2 rounded-full text-left transition-all duration-300 ease-in-out bg-success-container/20 text-on-surface hover:bg-success-container/35 border border-success/20 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface-container-low"
               title="Export / Restore Offline Case Archive (.json)"
             >
-              <div className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 shrink-0">
+              <span className="flex items-center justify-center w-8 h-8 rounded-full bg-success/20 text-success shrink-0">
                 <FolderArchive className="w-4 h-4" />
-              </div>
+              </span>
               {(!isCollapsed || isMobileOpen) && (
-                <div className="flex-1 truncate">
+                <span className="flex-1 truncate">
                   <span className="text-xs font-semibold tracking-tight block">Archive & Backup</span>
-                  <span className="text-[10px] text-slate-400 block truncate font-normal">
+                  <span className="text-[11px] text-on-surface-variant block truncate font-normal">
                     Export / restore case file (.json)
                   </span>
-                </div>
+                </span>
               )}
             </button>
           )}
         </div>
 
-        {/* Bottom Section: Clean Active Operation Info + Log Out */}
-        <div className="p-3 border-t border-slate-800/80 bg-slate-900/50">
+        {/* Bottom Section: Active Operation */}
+        <div className="p-3 border-t border-white/5 bg-surface-container-lowest/50 backdrop-blur-md">
           {!isCollapsed || isMobileOpen ? (
             <div className="space-y-2.5">
-              <div className="flex items-center gap-1.5 text-[11px] text-slate-400 font-mono">
-                <FolderGit2 className="w-3.5 h-3.5 text-amber-400" />
-                <span>ACTIVE OPERATION</span>
+              <div className="flex items-center gap-1.5 text-[11px] tracking-[0.08em] text-on-surface-variant font-medium uppercase">
+                <FolderGit2 className="w-3.5 h-3.5 text-primary" />
+                <span>Active Operation</span>
               </div>
 
-              {/* Case Name Display */}
-              <div className="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl space-y-1">
-                <h4 className="text-xs font-bold text-slate-100 line-clamp-2">
+              <div className="p-2.5 bg-surface-container-lowest border border-outline-variant rounded-lg space-y-1 transition-all duration-300 ease-in-out">
+                <h4 className="text-xs font-bold text-on-surface line-clamp-2 tracking-tight">
                   {currentCase.name}
                 </h4>
-                <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-slate-900 font-mono">
+                <div className="flex items-center justify-between text-[10px] text-on-surface-variant pt-1 border-t border-outline-variant font-mono">
                   <span className="truncate max-w-[130px]">{currentCase.leadAgency}</span>
                   <span>{currentCase.date}</span>
                 </div>
               </div>
 
-              {/* Sign Out Action */}
               {onLogout && (
                 <button
                   onClick={onLogout}
-                  className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-slate-950/80 hover:bg-rose-500/15 border border-slate-800 hover:border-rose-500/30 text-slate-400 hover:text-rose-300 text-xs font-semibold transition-all active:scale-95"
+                  className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-full bg-surface-container-lowest hover:bg-error-container/30 border border-outline-variant hover:border-error/30 text-on-surface-variant hover:text-error text-xs font-semibold transition-all duration-300 ease-in-out active:scale-95 focus-visible:ring-2 focus-visible:ring-error focus-visible:ring-offset-2 focus-visible:ring-offset-surface-container"
                   title="Sign Out of Session"
                 >
                   <LogOut className="w-3.5 h-3.5" />
-                  <span>Log Out</span>
+                  <span>{t("logout")}</span>
                 </button>
               )}
             </div>
           ) : (
             <div className="flex flex-col items-center gap-2">
               <div
-                className="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300 text-xs font-mono font-bold"
+                className="w-8 h-8 rounded-full bg-surface-container-highest border border-outline flex items-center justify-center text-on-surface text-xs font-mono font-bold"
                 title={`${currentCase.codeName} - ${currentCase.name}`}
               >
                 {currentCase.codeName.slice(0, 2)}
@@ -374,8 +360,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               {onLogout && (
                 <button
                   onClick={onLogout}
-                  className="w-8 h-8 rounded-lg bg-slate-900 hover:bg-rose-500/20 border border-slate-800 hover:border-rose-500/40 flex items-center justify-center text-slate-400 hover:text-rose-300 transition-colors"
+                  className="w-8 h-8 rounded-full bg-surface-container-high hover:bg-error-container/30 border border-outline-variant hover:border-error/40 flex items-center justify-center text-on-surface-variant hover:text-error transition-all duration-300 ease-in-out focus-visible:ring-2 focus-visible:ring-error focus-visible:ring-offset-2"
                   title="Log Out"
+                  aria-label="Log out"
                 >
                   <LogOut className="w-3.5 h-3.5" />
                 </button>

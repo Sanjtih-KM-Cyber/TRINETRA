@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import jsonwebtoken from "jsonwebtoken";
 import { db, DBUser } from "./db";
-import { isAdmin, tenureKey } from "../src/data/roles";
+import { isAdmin, tenureKey, caseTenureOf } from "../src/data/roles";
 
 const JWT_SECRET = process.env.JWT_SECRET || "trinetra-os-national-security-vault-key-2026";
 
@@ -160,10 +160,7 @@ export async function requireCaseMembership(
     const caseOrg = caseObj?.org;
     const caseState = caseObj?.state;
     if (caseOrg && caseOrg !== "UNKNOWN") {
-      const caseTenure =
-        caseOrg === "POLICE"
-          ? `POLICE:${String(caseState || "POLICE").toUpperCase()}`
-          : String(caseOrg).toUpperCase();
+      const caseTenure = caseTenureOf({ org: caseOrg, state: caseState });
       if (caseTenure !== adminTenure) {
         res.status(403).json({
           error: "Tenant Isolation",

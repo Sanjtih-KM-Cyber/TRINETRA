@@ -11,7 +11,7 @@ interface SahayakPanelProps {
   onChanged?: () => void;
 }
 
-type SubTab = "ask" | "docs" | "links" | "law";
+type SubTab = "ask" | "links";
 
 /**
  * Phase 4 Req19 — full-page SAHAYAK AI for the Lead Investigator workstation.
@@ -23,9 +23,7 @@ export const SahayakPanel: React.FC<SahayakPanelProps> = ({ caseId, readOnly = f
 
   const tabs: Array<{ id: SubTab; label: string; icon: React.ReactNode }> = [
     { id: "ask", label: "Ask", icon: <MessageSquareText className="w-3.5 h-3.5" /> },
-    { id: "docs", label: "Doc Intel", icon: <FileSearch className="w-3.5 h-3.5" /> },
     { id: "links", label: "Ev. Links", icon: <Link2 className="w-3.5 h-3.5" /> },
-    { id: "law", label: "Statutes", icon: <Scale className="w-3.5 h-3.5" /> },
   ];
 
   return (
@@ -44,11 +42,10 @@ export const SahayakPanel: React.FC<SahayakPanelProps> = ({ caseId, readOnly = f
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 rounded-xl text-[11px] font-bold border transition-all ${
-              tab === t.id
+            className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 rounded-xl text-[11px] font-bold border transition-all ${tab === t.id
                 ? "bg-amber-500/10 text-amber-300 border-amber-500/40"
                 : "bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200"
-            }`}
+              }`}
           >
             {t.icon} {t.label}
           </button>
@@ -57,9 +54,7 @@ export const SahayakPanel: React.FC<SahayakPanelProps> = ({ caseId, readOnly = f
 
       <div className="rounded-2xl bg-slate-900/70 border border-slate-800 p-4">
         {tab === "ask" && <AskTab caseId={caseId} />}
-        {tab === "docs" && <DocumentIntelTab caseId={caseId} readOnly={readOnly} />}
         {tab === "links" && <EvidenceLinksTab caseId={caseId} readOnly={readOnly} onChanged={() => onChanged?.()} />}
-        {tab === "law" && <StatutesTab caseId={caseId} />}
       </div>
     </div>
   );

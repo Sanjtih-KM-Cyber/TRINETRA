@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "../../context/AuthContext";
-import { caseApi } from "../../services/api";
+import { caseApi, sahayakApi } from "../../services/api";
+import { apiUrl } from "../../services/apiBase";
+import { fileToText } from "../../services/exhibitUpload";
+import { uploadExhibitFile } from "../../services/exhibitUpload";
 import { matrixFor } from "../../data/roleMatrices";
 import { orgOf } from "../../data/roles";
 import { departmentForUser } from "../../services/roleRouting";
@@ -21,12 +24,20 @@ import {
   Link2,
 } from "lucide-react";
 
-export const InvestigatorPortal: React.FC = () => {
+export const InvestigatorPortal: React.FC<{ initialCaseId?: string }> = ({ initialCaseId }) => {
   const { user, logout, authorizedCases, realtimeNotification, clearNotification } = useAuth();
 
   // Changes.md Field portal ("Police Login"): sighting form · reports · upload ledger · directives.
   const [activeTab, setActiveTab] = useState<"submit_observation" | "observations_log" | "field_reports">("submit_observation");
-  const [currentCaseId, setCurrentCaseId] = useState<string>(authorizedCases[0]?.id || "case-garuda");
+  // Open the case picked in My Workspace — fall back to the first authorized case.
+  const [currentCaseId, setCurrentCaseId] = useState<string>(
+    initialCaseId || authorizedCases[0]?.id || "case-garuda"
+  );
+
+  useEffect(() => {
+    if (initialCaseId && initialCaseId !== currentCaseId) setCurrentCaseId(initialCaseId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialCaseId]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [caseState, setCaseState] = useState<any>(null);
@@ -68,6 +79,82 @@ export const InvestigatorPortal: React.FC = () => {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // SAHAYAK auto-fill: candidates extracted from an uploaded file. Tapping a
+  // chip fills the subject-tagging field; known case targets auto-link below.
+  const [extractedHints, setExtractedHints] = useState<Array<{ label: string; type: string }>>([]);
+  const [autoFillMsg, setAutoFillMsg] = useState<string | null>(null);
+  const [autoFilling, setAutoFilling] = useState(false);
+
+  const normType = (t: string) =>
+    ["PERSON", "VEHICLE", "LOCATION", "PHONE"].includes(String(t || "").toUpperCase())
+      ? String(t).toUpperCase()
+      : "PERSON";
+
+  const autoFillFromFiles = async (files: FileList | File[]) => {
+    const arr = Array.from(files);
+    if (arr.length === 0) return;
+    setAutoFilling(true);
+    setAutoFillMsg(null);
+    try {
+      let filled = 0;
+      for (const f of arr) {
+        let converted: { text: string; via: string } | null = null;
+        try {
+          converted = await fileToText(f);
+        } catch {
+          converted = null;
+        }
+        if (!converted?.text.trim()) continue;
+        const snippet = converted.text.slice(0, 8000);
+        setNarrative((prev) =>
+          prev.includes(snippet.slice(0, 60))
+            ? prev
+            : `${prev}${prev.trim() ? "\n\n" : ""}[Auto-extracted from ${f.name}]\n${snippet}`
+        );
+        filled++;
+        // Entity candidates → subject-tagging suggestions + known-target links.
+        try {
+          const res = await sahayakApi.extract(converted.text.slice(0, 12000), f.name);
+          const cands = (res.nodes || [])
+            .filter((n: any) => n?.label)
+            .slice(0, 6)
+            .map((n: any) => ({ label: String(n.label), type: normType(n.type) }));
+          if (cands.length > 0) {
+            setExtractedHints((prev) => {
+              const seen = new Set(prev.map((p) => p.label.toLowerCase()));
+              return [...prev, ...cands.filter((c: { label: string }) => !seen.has(c.label.toLowerCase()))].slice(0, 12);
+            });
+            const first = cands[0];
+            setNewEntityLabel((prev) => prev || first.label);
+            setNewEntityType((prev) => (prev === "PERSON" && first.type !== "PERSON" ? first.type : prev));
+            const matched = cands
+              .map((c: { label: string }) => entities.find((e) => String(e.label || "").toLowerCase() === c.label.toLowerCase()))
+              .filter(Boolean);
+            if (matched.length > 0) {
+              setRelationSourceId((prev) => prev || matched[0].id);
+              if (matched.length > 1) setRelationTargetId((prev) => prev || matched[1].id);
+            }
+          }
+        } catch {
+          /* extraction is best-effort; the narrative text is already filled */
+        }
+      }
+      setAutoFillMsg(
+        filled > 0
+          ? `Narrative + subject tags auto-filled from ${filled} file(s) — review before submitting.`
+          : "Photo/audio attached — describe what it shows in the narrative; text files auto-fill this form."
+      );
+    } finally {
+      setAutoFilling(false);
+    }
+  };
+
+  const handlePickedFiles = (files: FileList | null | File[], mediaCategory: "PHOTO" | "AUDIO" | "DOCUMENT" | "VIDEO") => {
+    if (!files) return;
+    pushFiles(files, mediaCategory);
+    void autoFillFromFiles(files);
+  };
+
   // Field Report Form State
   const [reportTitle, setReportTitle] = useState("");
   const [reportType, setReportType] = useState("FIELD_INTERDICTION_MEMO");
@@ -99,6 +186,7 @@ export const InvestigatorPortal: React.FC = () => {
     if (arr.length === 0) return;
     const mapped = arr.map((f) => ({
       id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      file: f,
       fileName: f.name || `${mediaCategory.toLowerCase()}-${Date.now()}`,
       fileType: f.type || "application/octet-stream",
       fileSize: f.size,
@@ -188,13 +276,55 @@ export const InvestigatorPortal: React.FC = () => {
       });
     }
 
+    // Seal attached case files as exhibits first (PDF/DOC/images/audio/video):
+    // text-bearing files are converted to text via SAHAYAK so the Lead's
+    // Extracted-data queue fills. A file failure never blocks the observation.
+    const sealedAttachments: any[] = [];
+    const fileWarnings: string[] = [];
+    for (const att of attachmentList) {
+      if (!att.file) continue;
+      try {
+        const up = await uploadExhibitFile(currentCaseId, att.file as File);
+        sealedAttachments.push({
+          id: att.id,
+          fileName: att.fileName,
+          fileType: att.fileType,
+          fileSize: att.fileSize,
+          fileSizeFormatted: att.fileSizeFormatted,
+          mediaCategory: att.mediaCategory,
+          capturedAt: att.capturedAt,
+          exhibitId: up.id,
+          exhibitKind: up.kind,
+          textConverted: up.withText,
+        });
+      } catch (err: any) {
+        fileWarnings.push(`${att.fileName}: ${err.message || "seal failed"}`);
+        sealedAttachments.push({
+          id: att.id,
+          fileName: att.fileName,
+          fileType: att.fileType,
+          fileSize: att.fileSize,
+          fileSizeFormatted: att.fileSizeFormatted,
+          mediaCategory: att.mediaCategory,
+          capturedAt: att.capturedAt,
+        });
+      }
+    }
+
     try {
       const token = localStorage.getItem("crim_intel_token");
-      const res = await fetch(`/api/cases/${currentCaseId}/observations`, {
+      let vpn: string | null = null;
+      try {
+        vpn = sessionStorage.getItem("crim_intel_vpn");
+      } catch {
+        vpn = null;
+      }
+      const res = await fetch(apiUrl(`/api/cases/${currentCaseId}/observations`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          ...(vpn ? { "X-VPN-Session": vpn } : {}),
         },
         body: JSON.stringify({
           observationType,
@@ -205,7 +335,7 @@ export const InvestigatorPortal: React.FC = () => {
           lng: gps?.lng,
           relatedEntities,
           observedRelationships,
-          attachments: attachmentList,
+          attachments: sealedAttachments,
           tags: [observationType, "FIELD_COLLECTION"],
           confidenceScore: 0.95,
         }),
@@ -214,7 +344,12 @@ export const InvestigatorPortal: React.FC = () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to submit observation");
 
-      setSuccessMessage("Field observation recorded and staged for Lead review — it appears in the Intake Pipeline in real time. Nothing reaches the graph before approval.");
+      const sealed = sealedAttachments.filter((a) => a.exhibitId).length;
+      setSuccessMessage(
+        `Field observation recorded and staged for Lead review — it appears in the Intake Pipeline in real time. Nothing reaches the graph before approval.` +
+        (sealed > 0 ? ` ${sealed} file(s) sealed as exhibits${fileWarnings.length ? "" : " with text conversion"}.` : "") +
+        (fileWarnings.length > 0 ? ` File warnings: ${fileWarnings.join("; ")}` : "")
+      );
       setTitle("");
       setNarrative("");
       setLocationName("");
@@ -248,11 +383,18 @@ export const InvestigatorPortal: React.FC = () => {
 
     try {
       const token = localStorage.getItem("crim_intel_token");
-      const res = await fetch(`/api/cases/${currentCaseId}/field-report`, {
+      let vpnReport: string | null = null;
+      try {
+        vpnReport = sessionStorage.getItem("crim_intel_vpn");
+      } catch {
+        vpnReport = null;
+      }
+      const res = await fetch(apiUrl(`/api/cases/${currentCaseId}/field-report`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          ...(vpnReport ? { "X-VPN-Session": vpnReport } : {}),
         },
         body: JSON.stringify({
           title: reportTitle.trim(),
@@ -292,7 +434,10 @@ export const InvestigatorPortal: React.FC = () => {
               ✕
             </button>
           </div>
-          <p className="text-xs text-slate-200 mt-1.5">{realtimeNotification.details}</p>
+          <p className="text-xs text-slate-200 mt-1.5">{realtimeNotification.details || realtimeNotification.message}</p>
+          <div className="mt-2 text-[10px] font-mono text-slate-400">
+            By: {(realtimeNotification as any).actor_name || (realtimeNotification as any).user_name || "Unknown"} ({(realtimeNotification as any).actor_role || (realtimeNotification as any).user_role || "System"})
+          </div>
         </div>
       )}
 
@@ -366,11 +511,10 @@ export const InvestigatorPortal: React.FC = () => {
       <div className="bg-slate-900/50 border-b border-slate-800/80 px-4 sm:px-8 py-2 flex items-center gap-2 overflow-x-auto">
         <button
           onClick={() => setActiveTab("submit_observation")}
-          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-            activeTab === "submit_observation"
-              ? "bg-blue-600 text-white shadow-sm"
-              : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
-          }`}
+          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${activeTab === "submit_observation"
+            ? "bg-blue-600 text-white shadow-sm"
+            : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
+            }`}
         >
           <Camera className="w-3.5 h-3.5" />
           <span>Log Field Sighting / Observation</span>
@@ -378,11 +522,10 @@ export const InvestigatorPortal: React.FC = () => {
 
         <button
           onClick={() => setActiveTab("observations_log")}
-          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-            activeTab === "observations_log"
-              ? "bg-blue-600 text-white shadow-sm"
-              : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
-          }`}
+          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${activeTab === "observations_log"
+            ? "bg-blue-600 text-white shadow-sm"
+            : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
+            }`}
         >
           <MapPin className="w-3.5 h-3.5" />
           <span>Sightings & Observations Ledger ({observations.length})</span>
@@ -390,11 +533,10 @@ export const InvestigatorPortal: React.FC = () => {
 
         <button
           onClick={() => setActiveTab("field_reports")}
-          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-            activeTab === "field_reports"
-              ? "bg-blue-600 text-white shadow-sm"
-              : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
-          }`}
+          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${activeTab === "field_reports"
+            ? "bg-blue-600 text-white shadow-sm"
+            : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
+            }`}
         >
           <FileText className="w-3.5 h-3.5" />
           <span>Field Intelligence Reports</span>
@@ -485,11 +627,10 @@ export const InvestigatorPortal: React.FC = () => {
                           key={t.id}
                           type="button"
                           onClick={() => setObservationType(t.id as any)}
-                          className={`p-2.5 rounded-xl border text-left flex items-center gap-2 text-xs font-medium transition-all ${
-                            isSelected
-                              ? "bg-blue-600 border-blue-500 text-white shadow"
-                              : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
-                          }`}
+                          className={`p-2.5 rounded-xl border text-left flex items-center gap-2 text-xs font-medium transition-all ${isSelected
+                            ? "bg-blue-600 border-blue-500 text-white shadow"
+                            : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
+                            }`}
                         >
                           <Icon className="w-4 h-4 shrink-0" />
                           <span className="truncate">{t.label}</span>
@@ -568,9 +709,14 @@ export const InvestigatorPortal: React.FC = () => {
                     required
                     value={narrative}
                     onChange={(e) => setNarrative(e.target.value)}
-                    placeholder="Provide chronological details, subject behaviors, descriptions, vehicle plates, escort patterns, package handovers..."
+                    placeholder="Provide chronological details, subject behaviors, descriptions, vehicle plates, escort patterns, package handovers... (auto-fills when you attach a text/PDF/Word file)"
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                   />
+                  {(autoFilling || autoFillMsg) && (
+                    <p className="text-[11px] font-mono text-blue-300/90 mt-1">
+                      {autoFilling ? "SAHAYAK is reading the attached file…" : autoFillMsg}
+                    </p>
+                  )}
                 </div>
 
                 {/* 4. Subject Association / Entity Resolution */}
@@ -579,6 +725,25 @@ export const InvestigatorPortal: React.FC = () => {
                     <UserCheck className="w-3.5 h-3.5" />
                     <span>Entity Resolution & Subject Tagging</span>
                   </div>
+
+                  {extractedHints.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {extractedHints.map((h) => (
+                        <button
+                          key={h.label}
+                          type="button"
+                          onClick={() => {
+                            setNewEntityLabel(h.label);
+                            setNewEntityType(h.type);
+                          }}
+                          title={`Fill subject field with ${h.label}`}
+                          className="px-2 py-1 rounded-lg bg-blue-600/15 hover:bg-blue-600/30 border border-blue-500/40 text-blue-200 text-[11px] font-mono transition-colors"
+                        >
+                          ✦ {h.label} <span className="text-blue-400/70">· {h.type}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
@@ -642,7 +807,7 @@ export const InvestigatorPortal: React.FC = () => {
                         className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200"
                       >
                         <option value="">-- Source Entity --</option>
-                        {entities.map((ent) => (
+                        {entities.filter((ent) => (ent.reviewState || "NEEDS_REVIEW") !== "NEEDS_REVIEW").map((ent) => (
                           <option key={ent.id} value={ent.id}>{ent.label}</option>
                         ))}
                       </select>
@@ -671,7 +836,7 @@ export const InvestigatorPortal: React.FC = () => {
                         className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200"
                       >
                         <option value="">-- Target Entity --</option>
-                        {entities.map((ent) => (
+                        {entities.filter((ent) => (ent.reviewState || "NEEDS_REVIEW") !== "NEEDS_REVIEW").map((ent) => (
                           <option key={ent.id} value={ent.id}>{ent.label}</option>
                         ))}
                       </select>
@@ -686,7 +851,7 @@ export const InvestigatorPortal: React.FC = () => {
                       <Camera className="w-3.5 h-3.5" />
                       <span>Field Capture · Camera / Audio / FIR / Dossier</span>
                     </div>
-                    <span className="text-[10px] text-slate-500 font-mono">Device + hash sealed server-side</span>
+                    <span className="text-[10px] text-slate-500 font-mono">Files ≤15GB · sealed + text-converted server-side</span>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -700,11 +865,10 @@ export const InvestigatorPortal: React.FC = () => {
                     <button
                       type="button"
                       onClick={toggleVoiceNote}
-                      className={`px-3 py-2 rounded-lg text-xs font-semibold border ${
-                        isRecording
-                          ? "bg-rose-500/20 text-rose-200 border-rose-500/50 animate-pulse"
-                          : "bg-blue-600/20 hover:bg-blue-600/40 text-blue-200 border-blue-500/40"
-                      }`}
+                      className={`px-3 py-2 rounded-lg text-xs font-semibold border ${isRecording
+                        ? "bg-rose-500/20 text-rose-200 border-rose-500/50 animate-pulse"
+                        : "bg-blue-600/20 hover:bg-blue-600/40 text-blue-200 border-blue-500/40"
+                        }`}
                     >
                       {isRecording ? "⏹ Stop voice note" : "🎙 Witness voice note"}
                     </button>
@@ -724,7 +888,7 @@ export const InvestigatorPortal: React.FC = () => {
                     multiple
                     className="hidden"
                     onChange={(e) => {
-                      if (e.target.files) pushFiles(e.target.files, "PHOTO");
+                      if (e.target.files) handlePickedFiles(e.target.files, "PHOTO");
                       e.target.value = "";
                     }}
                   />
@@ -734,18 +898,18 @@ export const InvestigatorPortal: React.FC = () => {
                     accept="audio/*"
                     className="hidden"
                     onChange={(e) => {
-                      if (e.target.files) pushFiles(e.target.files, "AUDIO");
+                      if (e.target.files) handlePickedFiles(e.target.files, "AUDIO");
                       e.target.value = "";
                     }}
                   />
                   <input
                     ref={docInputRef}
                     type="file"
-                    accept=".pdf,.doc,.docx,.txt,image/*"
+                    accept=".pdf,.doc,.docx,.txt,.log,.csv,image/*"
                     multiple
                     className="hidden"
                     onChange={(e) => {
-                      if (e.target.files) pushFiles(e.target.files, "DOCUMENT");
+                      if (e.target.files) handlePickedFiles(e.target.files, "DOCUMENT");
                       e.target.value = "";
                     }}
                   />
@@ -982,6 +1146,20 @@ export const InvestigatorPortal: React.FC = () => {
           </div>
         )}
       </main>
+
+      {/* Persistent Mobile Field-Intelligence Action Bar / FAB */}
+      <div className="md:hidden fixed bottom-6 right-6 z-50">
+        <button
+          onClick={() => {
+            setActiveTab("submit_observation");
+            photoInputRef.current?.click();
+          }}
+          className="w-14 h-14 rounded-full bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center shadow-[0_0_30px_rgba(37,99,235,0.5)] border border-blue-400 active:scale-95 transition-transform"
+        >
+          <Camera className="w-6 h-6" />
+        </button>
+      </div>
+
     </div>
   );
 };

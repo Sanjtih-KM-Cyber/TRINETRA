@@ -64,12 +64,6 @@ export const RelationshipDetailDrawer: React.FC<RelationshipDetailDrawerProps> =
           color: "bg-rose-500/20 text-rose-300 border-rose-500/40",
           icon: XCircle,
         };
-      case "UNCERTAIN":
-        return {
-          label: "UNCERTAIN / UNCORROBORATED",
-          color: "bg-purple-500/20 text-purple-300 border-purple-500/40",
-          icon: HelpCircle,
-        };
       case "NEEDS_REVIEW":
       default:
         return {
@@ -157,7 +151,7 @@ export const RelationshipDetailDrawer: React.FC<RelationshipDetailDrawerProps> =
           </div>
         </div>
 
-        {/* Human-in-the-Loop Review State Controller */}
+        {/* Human-in-the-Loop Review State Controller — options close once confirmed */}
         <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-xl space-y-2.5">
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-mono font-bold text-slate-300 uppercase tracking-wider">
@@ -169,7 +163,19 @@ export const RelationshipDetailDrawer: React.FC<RelationshipDetailDrawerProps> =
             </span>
           </div>
 
-          <div className="grid grid-cols-4 gap-1.5 pt-1">
+          {currentReview === "CONFIRMED" ? (
+            <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/30 rounded-xl flex items-center justify-between gap-2">
+              <span className="text-[11px] font-bold text-emerald-300">✓ Confirmed link — review options closed</span>
+              <button
+                onClick={() => onUpdateReviewState(link.id, "NEEDS_REVIEW")}
+                className="text-[10px] font-mono text-slate-400 hover:text-amber-300 underline shrink-0"
+                title="Re-open this link for review"
+              >
+                re-open
+              </button>
+            </div>
+          ) : (
+          <div className="grid grid-cols-3 gap-1.5 pt-1">
             <button
               onClick={() => onUpdateReviewState(link.id, "CONFIRMED")}
               className={`py-1.5 px-2 rounded-lg text-[10px] font-bold transition-all flex flex-col items-center justify-center gap-1 border ${
@@ -195,18 +201,6 @@ export const RelationshipDetailDrawer: React.FC<RelationshipDetailDrawerProps> =
             </button>
 
             <button
-              onClick={() => onUpdateReviewState(link.id, "UNCERTAIN")}
-              className={`py-1.5 px-2 rounded-lg text-[10px] font-bold transition-all flex flex-col items-center justify-center gap-1 border ${
-                currentReview === "UNCERTAIN"
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/60 ring-1 ring-purple-500/30"
-                  : "bg-slate-900 border-slate-800 text-slate-400 hover:text-purple-300 hover:bg-slate-800"
-              }`}
-            >
-              <HelpCircle className="w-3.5 h-3.5" />
-              <span>Uncertain</span>
-            </button>
-
-            <button
               onClick={() => onUpdateReviewState(link.id, "REJECTED")}
               className={`py-1.5 px-2 rounded-lg text-[10px] font-bold transition-all flex flex-col items-center justify-center gap-1 border ${
                 currentReview === "REJECTED"
@@ -218,6 +212,7 @@ export const RelationshipDetailDrawer: React.FC<RelationshipDetailDrawerProps> =
               <span>Reject</span>
             </button>
           </div>
+          )}
         </div>
 
         {/* Section 1: SOURCE EVIDENCE & DOCUMENT SNIPPET CITATION */}

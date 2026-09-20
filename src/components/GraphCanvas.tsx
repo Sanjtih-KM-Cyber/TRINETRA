@@ -191,7 +191,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     if (engineMode !== "svg" || !svgRef.current) return;
 
     const svg = d3.select(svgRef.current);
-    
+
     // Smoothly transition links
     svg.selectAll<SVGLineElement, any>("g.links line")
       .transition()
@@ -269,6 +269,8 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   // Filtered nodes and links based on UI controls + clearance
   const filteredNodes = useMemo(() => {
     return nodes.filter((n) => {
+      // Rejected leads are removed from the graph altogether.
+      if ((n.reviewState || "NEEDS_REVIEW") === "REJECTED") return false;
       if (!selectedTypes.includes(n.type)) return false;
       if (n.riskScore < minRisk) return false;
       if (onlyKingpins && !n.isKingpinCandidate) return false;
@@ -313,6 +315,8 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
   const filteredLinks = useMemo(() => {
     return links.filter((l) => {
+      // Rejected links are removed from the graph altogether.
+      if ((l.reviewState || "NEEDS_REVIEW") === "REJECTED") return false;
       const s = typeof l.source === "object" ? (l.source as any).id : l.source;
       const t = typeof l.target === "object" ? (l.target as any).id : l.target;
       return filteredNodeIds.has(s) && filteredNodeIds.has(t);
@@ -460,7 +464,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       const index = new Map<string, (CrimeNetworkNode & d3.SimulationNodeDatum)[]>();
       const maxRadius = Math.max(...nodes.map((nd) => getNodeRadius(nd)), 10);
       const effectiveCellSize = Math.max(100, maxRadius * 2.5);
-      
+
       nodes.forEach((node) => {
         if (node.x !== undefined && node.y !== undefined) {
           const col = Math.floor(node.x / effectiveCellSize);
@@ -483,15 +487,15 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     const getHitNode = (graphX: number, graphY: number, tolerance = 10): (CrimeNetworkNode & d3.SimulationNodeDatum) | null => {
       const spatialData = spatialIndexRef.current;
       if (!spatialData) return null;
-      
+
       const { index, cellSize } = spatialData;
       const col = Math.floor(graphX / cellSize);
       const row = Math.floor(graphY / cellSize);
-      
+
       // Check current cell and 8 neighboring cells
       let closest: (CrimeNetworkNode & d3.SimulationNodeDatum) | null = null;
       let minDist = Infinity;
-      
+
       for (let dc = -1; dc <= 1; dc++) {
         for (let dr = -1; dr <= 1; dr++) {
           const key = `${col + dc},${row + dr}`;
@@ -633,12 +637,12 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
           ctx.fillStyle = isHovered
             ? "rgba(56, 189, 248, 0.35)"
             : isSelected
-            ? "rgba(56, 189, 248, 0.25)"
-            : isPattern
-            ? "rgba(244, 63, 94, 0.3)"
-            : isShortest
-            ? "rgba(245, 158, 11, 0.3)"
-            : "rgba(234, 179, 8, 0.2)";
+              ? "rgba(56, 189, 248, 0.25)"
+              : isPattern
+                ? "rgba(244, 63, 94, 0.3)"
+                : isShortest
+                  ? "rgba(245, 158, 11, 0.3)"
+                  : "rgba(234, 179, 8, 0.2)";
           ctx.fill();
           ctx.lineWidth = 1.5;
           ctx.strokeStyle = isHovered || isSelected ? "#38bdf8" : isPattern ? "#f43f5e" : isShortest ? "#f59e0b" : "#eab308";
@@ -653,6 +657,20 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         ctx.lineWidth = isHovered ? 3.5 : isSelected ? 3 : node.isCutVertex ? 2.5 : 1.5;
         ctx.strokeStyle = isHovered || isSelected ? "#38bdf8" : node.isCutVertex ? "#a855f7" : "rgba(15, 23, 42, 0.9)";
         ctx.stroke();
+
+        // Review-state ring (realtime color coding: confirmed emerald,
+        // needs-review amber). Rejected nodes are filtered out.
+        const review = node.reviewState || "NEEDS_REVIEW";
+        if (!isHovered && !isSelected) {
+          const ring = review === "CONFIRMED" ? "#10b981" : "#f59e0b";
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r + 3, 0, Math.PI * 2);
+          ctx.lineWidth = review === "CONFIRMED" ? 1.5 : 2.5;
+          ctx.strokeStyle = ring;
+          ctx.globalAlpha = (nodeAlpha ?? 1) * (review === "CONFIRMED" ? 0.55 : 0.95);
+          ctx.stroke();
+          ctx.globalAlpha = nodeAlpha;
+        }
 
         // Node Label — Phase 7 Req29 typography: dark halo underlay so labels
         // stay legible where nodes cluster (always shown for hovered node &
@@ -698,7 +716,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         const index = new Map<string, (CrimeNetworkNode & d3.SimulationNodeDatum)[]>();
         const maxRadius = Math.max(...simNodes.map((nd) => getNodeRadius(nd)), 10);
         const effectiveCellSize = Math.max(100, maxRadius * 2.5);
-        
+
         simNodes.forEach((node) => {
           if (node.x !== undefined && node.y !== undefined) {
             const col = Math.floor(node.x / effectiveCellSize);
@@ -1005,8 +1023,13 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         return d.flags && d.flags.length > 0 ? "4,4" : "none";
       })
       .attr("opacity", (d) => {
-        if (!hoveredNodeId) return 0.8;
-        return isLinkConnectedToHovered((d.source as any).id, (d.target as any).id) ? 1.0 : 0.08;
+        if (hoveredNodeId) {
+          return isLinkConnectedToHovered((d.source as any).id, (d.target as any).id) ? 1.0 : 0.08;
+        }
+        if (highlightedPatternLinkIds && highlightedPatternLinkIds.length > 0) {
+          return highlightedPatternLinkIds.includes(d.id) ? 1.0 : 0.08;
+        }
+        return 0.8;
       })
       .on("click", (event, d) => {
         event.stopPropagation();
@@ -1027,8 +1050,13 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       .style("cursor", "pointer")
       .style("transition", "opacity 0.2s ease")
       .attr("opacity", (d) => {
-        if (!hoveredNodeId) return 1;
-        return isNodeConnectedToHovered(d.id) ? 1 : 0.12;
+        if (hoveredNodeId) {
+          return isNodeConnectedToHovered(d.id) ? 1 : 0.12;
+        }
+        if (highlightedPatternNodeIds && highlightedPatternNodeIds.length > 0) {
+          return highlightedPatternNodeIds.includes(d.id) ? 1 : 0.12;
+        }
+        return 1;
       })
       .call(
         d3
@@ -1079,7 +1107,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       .attr("stroke-width", (d) => (d.id === hoveredNodeId ? 2 : 1.5))
       .attr("stroke-dasharray", "4,3");
 
-    // Main Node Circle
+    // Main Node Circle (realtime review-state color coding; rejected filtered out)
     node
       .append("circle")
       .attr("r", (d) => getNodeRadius(d))
@@ -1087,6 +1115,9 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       .attr("stroke", (d) => {
         if (d.id === hoveredNodeId || d.id === selectedNodeId) return "#38bdf8";
         if (d.isCutVertex) return "#a855f7";
+        const review = (d.reviewState || "NEEDS_REVIEW") as string;
+        if (review === "CONFIRMED") return "#10b981";
+        if (review === "NEEDS_REVIEW") return "#f59e0b";
         if (d.category === "INVESTIGATOR_KNOWLEDGE") return "#c084fc";
         return "rgba(15, 23, 42, 0.9)";
       })
@@ -1212,12 +1243,12 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
               placeholder="Search suspect, alias, phone, IMEI..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-xl pl-9 pr-4 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 w-64 shadow-xl"
+              className="glass-panel rounded-xl pl-9 pr-4 py-2 text-xs text-on-surface placeholder-on-surface-variant/50 focus:outline-none focus:border-primary w-64 shadow-xl"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery("")}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -1226,16 +1257,15 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
           <button
             onClick={() => setIsFilterPanelOpen(!isFilterPanelOpen)}
-            className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 backdrop-blur-md transition-all shadow-xl ${
-              isFilterPanelOpen || selectedTypes.length < 7 || minRisk > 0 || selectedCategory !== "ALL"
-                ? "bg-amber-500/20 border border-amber-500/50 text-amber-300"
-                : "bg-slate-900/90 border border-slate-800 text-slate-300 hover:border-slate-700"
-            }`}
+            className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all shadow-xl ${isFilterPanelOpen || selectedTypes.length < 7 || minRisk > 0 || selectedCategory !== "ALL"
+              ? "bg-primary/20 border border-primary/50 text-primary glass-panel"
+              : "glass-panel text-on-surface-variant hover:text-on-surface"
+              }`}
           >
             <SlidersHorizontal className="w-3.5 h-3.5" />
             <span>Filters</span>
             {(selectedTypes.length < 7 || minRisk > 0 || selectedCategory !== "ALL") && (
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+              <span className="w-2 h-2 rounded-full bg-primary animate-pulse shadow-[0_0_10px_rgba(var(--color-primary),0.5)]" />
             )}
           </button>
         </div>
@@ -1243,50 +1273,53 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         {/* Right: Engine Switcher (Canvas 60FPS vs SVG) + Zoom Controls */}
         <div className="flex items-center gap-2 pointer-events-auto">
           {/* Dual-Engine Mode Switcher */}
-          <div className="bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-xl p-1 flex items-center gap-1 shadow-xl">
+          <div className="glass-panel rounded-xl p-1 flex items-center gap-1 shadow-xl">
             <button
               onClick={() => setEngineMode("svg")}
-              className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1.5 transition-colors ${
-                engineMode === "svg" ? "bg-amber-500/20 text-amber-300 border border-amber-500/40" : "text-slate-400 hover:text-slate-200"
-              }`}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1.5 transition-colors ${engineMode === "svg" ? "bg-primary-container text-on-primary-container border border-primary/40 shadow-sm" : "text-on-surface-variant hover:text-on-surface"
+                }`}
               title="High-Definition Vector Tactical Mode"
             >
-              <Sparkles className="w-3 h-3 text-amber-400" />
+              <Sparkles className="w-3 h-3 text-primary" />
               <span>SVG Tactical</span>
             </button>
             <button
               onClick={() => setEngineMode("canvas")}
-              className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1.5 transition-colors ${
-                engineMode === "canvas" ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40" : "text-slate-400 hover:text-slate-200"
-              }`}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1.5 transition-colors ${engineMode === "canvas" ? "bg-secondary-container text-on-secondary-container border border-secondary/40 shadow-sm" : "text-on-surface-variant hover:text-on-surface"
+                }`}
               title="High-Performance 60FPS Canvas for 1,000s of Entities"
             >
-              <Cpu className="w-3 h-3 text-cyan-400" />
+              <Cpu className="w-3 h-3 text-secondary" />
               <span>Canvas 60FPS</span>
-              <span className="text-[9px] px-1 py-0.2 bg-cyan-950 border border-cyan-800 text-cyan-400 rounded">FAST</span>
+              <span className="text-[9px] px-1 py-0.2 bg-secondary/10 border border-secondary/30 text-secondary rounded">FAST</span>
             </button>
           </div>
 
           {/* Node Count & Metric Selector */}
-          <div className="bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-300 flex items-center gap-2 shadow-xl">
-            <span className="font-mono text-[11px] text-amber-400 font-bold">{filteredNodes.length}</span>
-            <span className="text-slate-500">nodes</span>
-            <span className="text-slate-700">|</span>
-            <span className="font-mono text-[11px] text-sky-400 font-bold">{filteredLinks.length}</span>
-            <span className="text-slate-500">links</span>
+          <div className="glass-panel border-white/5 rounded-xl px-3 py-1.5 text-xs text-on-surface-variant flex items-center gap-2 shadow-xl font-mono">
+            <span className="text-[11px] text-primary font-bold">{filteredNodes.length}</span>
+            <span>nodes</span>
+            <span className="opacity-40">|</span>
+            <span className="text-[11px] text-secondary font-bold">{filteredLinks.length}</span>
+            <span>links</span>
+            <span className="opacity-40">|</span>
+            <span className="text-[11px] text-error font-bold" title="Entities awaiting review">
+              {filteredNodes.filter((n) => (n.reviewState || "NEEDS_REVIEW") === "NEEDS_REVIEW").length}
+            </span>
+            <span>in review</span>
           </div>
 
-          <div className="bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-xl p-1 flex items-center gap-1 shadow-xl">
+          <div className="glass-panel border-white/5 rounded-xl p-1 flex items-center gap-1 shadow-xl">
             <button
               onClick={handleResetZoom}
-              className="p-1.5 text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
+              className="p-1.5 text-on-surface-variant hover:text-on-surface hover:bg-surface-container rounded-lg transition-colors"
               title="Recenter Canvas"
             >
               <Maximize2 className="w-4 h-4" />
             </button>
             <button
               onClick={toggleFullscreen}
-              className={`p-1.5 rounded-lg transition-colors ${isFullscreen ? "text-amber-300 bg-amber-500/15" : "text-slate-300 hover:text-white hover:bg-slate-800"}`}
+              className={`p-1.5 rounded-lg transition-colors ${isFullscreen ? "text-primary bg-primary/15" : "text-on-surface-variant hover:text-on-surface hover:bg-surface-container"}`}
               title={isFullscreen ? "Exit full screen" : "Expand canvas full screen"}
             >
               {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Expand className="w-4 h-4" />}
@@ -1297,22 +1330,22 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
       {/* Advanced Filter Drawer */}
       {isFilterPanelOpen && (
-        <div className="absolute top-18 left-4 z-20 w-80 bg-slate-900/95 backdrop-blur-md border border-slate-800 rounded-2xl p-4 shadow-2xl space-y-4 animate-in fade-in duration-150">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+        <div className="absolute top-18 left-4 z-20 w-80 glass-panel border border-white/10 rounded-2xl p-4 shadow-2xl space-y-4 animate-in fade-in duration-150">
+          <div className="flex items-center justify-between pb-2 border-b border-white/5">
             <div className="flex items-center gap-2">
-              <Filter className="w-4 h-4 text-amber-400" />
-              <span className="text-xs font-bold text-slate-100 uppercase tracking-wider font-mono">
+              <Filter className="w-4 h-4 text-primary" />
+              <span className="text-xs font-bold text-on-surface uppercase tracking-wider font-mono">
                 Advanced Canvas Filters
               </span>
             </div>
-            <button onClick={() => setIsFilterPanelOpen(false)} className="text-slate-400 hover:text-slate-200">
+            <button onClick={() => setIsFilterPanelOpen(false)} className="text-on-surface-variant hover:text-on-surface">
               <X className="w-4 h-4" />
             </button>
           </div>
 
           {/* Sizing Metric */}
           <div className="space-y-1.5">
-            <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Node Size Dimension</span>
+            <span className="text-[11px] font-mono text-on-surface-variant uppercase tracking-wider">Node Size Dimension</span>
             <div className="grid grid-cols-2 gap-1.5">
               {[
                 { id: "betweenness", label: "Betweenness (Kingpin)" },
@@ -1323,11 +1356,10 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
                 <button
                   key={metric.id}
                   onClick={() => setSizingMetric(metric.id as any)}
-                  className={`px-2 py-1.5 rounded-lg text-[11px] font-medium border text-left transition-colors ${
-                    sizingMetric === metric.id
-                      ? "bg-amber-500/20 border-amber-500/50 text-amber-300"
-                      : "bg-slate-950 border-slate-800 text-slate-400"
-                  }`}
+                  className={`px-2 py-1.5 rounded-lg text-[11px] font-medium border text-left transition-colors ${sizingMetric === metric.id
+                    ? "bg-primary-container border-primary/50 text-on-primary-container"
+                    : "bg-surface-container-low border-white/5 text-on-surface-variant hover:text-on-surface"
+                    }`}
                 >
                   {metric.label}
                 </button>
@@ -1337,7 +1369,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
           {/* Entity Classifications */}
           <div className="space-y-2">
-            <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Entity Classifications</span>
+            <span className="text-[11px] font-mono text-on-surface-variant uppercase tracking-wider">Entity Classifications</span>
             <div className="grid grid-cols-2 gap-1.5">
               {[
                 { type: "PERSON" as const, label: "Persons", color: "text-orange-400" },
@@ -1352,13 +1384,12 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
                   <button
                     key={item.type}
                     onClick={() => toggleTypeFilter(item.type)}
-                    className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border text-left flex items-center justify-between transition-colors ${
-                      isSelected
-                        ? "bg-slate-950 border-amber-500/40 text-slate-100"
-                        : "bg-slate-950/40 border-slate-800 text-slate-500 line-through"
-                    }`}
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border text-left flex items-center justify-between transition-colors ${isSelected
+                      ? "bg-surface-container-high border-primary/40 text-on-surface"
+                      : "bg-surface-container-lowest/40 border-white/5 text-on-surface-variant opacity-60 line-through"
+                      }`}
                   >
-                    <span className={isSelected ? item.color : "text-slate-500"}>{item.label}</span>
+                    <span className={isSelected ? item.color : "text-on-surface-variant font-mono text-[10px]"}>{item.label}</span>
                   </button>
                 );
               })}
@@ -1366,10 +1397,10 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
           </div>
 
           {/* Minimum Risk Threshold Slider */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-xs font-mono">
-              <span className="text-slate-400">Min Threat Risk:</span>
-              <span className="text-amber-400 font-bold">{minRisk} / 100</span>
+          <div className="space-y-1.5 pt-2 border-t border-white/5">
+            <div className="flex items-center justify-between text-[11px] font-mono">
+              <span className="text-on-surface-variant">Min Threat Risk:</span>
+              <span className="text-primary font-bold">{minRisk} / 100</span>
             </div>
             <input
               type="range"
@@ -1378,7 +1409,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
               step={5}
               value={minRisk}
               onChange={(e) => setMinRisk(parseInt(e.target.value))}
-              className="w-full accent-amber-500 bg-slate-950 h-1.5 rounded-lg cursor-pointer"
+              className="w-full accent-primary h-1.5 rounded-lg cursor-pointer"
             />
           </div>
         </div>

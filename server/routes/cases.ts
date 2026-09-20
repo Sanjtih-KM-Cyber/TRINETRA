@@ -1,16 +1,112 @@
 import { Router, Response } from "express";
 import { db, DBEvidence, DBEntity, DBRelationship, DBAuditLog, DBInvestigationEvent, DBCaseMember, DBRequisition, DBDossierSignature } from "../db";
 import { authenticateToken, requireCaseMembership, requireEditAccess, requireFunctional, requireRole, AuthenticatedRequest } from "../auth";
-import { isAdmin, isLead, tenureKey, sameTenure, orgOf, ADMIN_ROLES, LEAD_ROLES } from "../../src/data/roles";
+import { isAdmin, isLead, tenureKey, caseTenureOf, sameTenure, orgOf, isStatewiseOrg, ADMIN_ROLES, LEAD_ROLES } from "../../src/data/roles";
 import type { DBRole } from "../db";
 import { broadcastCaseUpdate } from "../realtime";
 import { autoLogDiary } from "../services/diaryService";
-import { extractEntitiesWithGemini, parseCDRCSV, parseFinancialCSV, extractEntitiesRuleBased } from "../../src/services/nlpExtractor";
+import { extractEntitiesUniversal, parseCDRCSV, parseFinancialCSV, extractEntitiesRuleBased } from "../../src/services/nlpExtractor";
+import { computeGraphAnalytics } from "../../src/services/graphEngine";
+import { CrimeNetworkNode, CrimeNetworkLink } from "../../src/types";
+
+function toGraphNodes(entities: any[]): CrimeNetworkNode[] {
+  return entities.map((e) => ({
+    ...e,
+    type: e.type as CrimeNetworkNode["type"],
+  }));
+}
+function toGraphLinks(links: any[]): CrimeNetworkLink[] {
+  return links.map((l) => ({
+    ...l,
+    source: typeof l.source === "object" ? (l.source as any).id : l.source,
+    target: typeof l.target === "object" ? (l.target as any).id : l.target,
+  }));
+}
 import crypto from "crypto";
 
 const router = Router();
 
 router.use(authenticateToken);
+
+/**
+ * SAHAYAK auto-extract: convert an exhibit's text into candidate entities /
+ * links and stage them (PENDING) so the Lead's Extracted-data review queue
+ * fills the moment anyone uploads — no manual triage step required first.
+ * Deterministic offline-safe extractors (rule-based/CSV); the Lead still
+ * accepts or rejects every item before it reaches the main graph.
+ */
+async function extractAndStageExhibit(
+  caseId: string,
+  ev: any,
+  actor: { name: string;[k: string]: any },
+  note?: string
+): Promise<{ batchId: string; entities: number; links: number }> {
+  const textToProcess = (ev as any).raw_text || "";
+  let extractedNodes: any[] = [];
+  let extractedLinks: any[] = [];
+  if (ev.file_type === "CDR_CSV" && textToProcess.includes(",")) {
+    const recs = parseCDRCSV(textToProcess);
+    const nodeMap = new Map<string, any>();
+    recs.forEach((rec: any, idx: number) => {
+      const aId = `phone-${String(rec.aParty || "").replace(/\D/g, "")}`;
+      const bId = `phone-${String(rec.bParty || "").replace(/\D/g, "")}`;
+      if (!nodeMap.has(aId)) nodeMap.set(aId, { id: aId, label: rec.aParty, type: "PHONE", riskScore: 65, confidence: 0.95, details: { phone: rec.aParty } });
+      if (!nodeMap.has(bId)) nodeMap.set(bId, { id: bId, label: rec.bParty, type: "PHONE", riskScore: 60, confidence: 0.9, details: { phone: rec.bParty } });
+      extractedLinks.push({ id: `link-auto-${Date.now()}-${idx}`, source: aId, target: bId, relationType: "CALLS", confidence: 0.95, details: { timestamp: rec.timestamp } });
+    });
+    extractedNodes = Array.from(nodeMap.values());
+  } else if (ev.file_type === "FINANCIAL_CSV" && textToProcess.includes(",")) {
+    const recs = parseFinancialCSV(textToProcess);
+    const nodeMap = new Map<string, any>();
+    recs.forEach((rec: any, idx: number) => {
+      for (const [key, label] of [["senderAcc", rec.senderName], ["receiverAcc", rec.receiverName]] as Array<[string, string]>) {
+        const id = `acct-${String((rec as any)[key] || "").replace(/\D/g, "")}`;
+        if (!nodeMap.has(id)) nodeMap.set(id, { id, label: label || (rec as any)[key], type: "FINANCIAL", riskScore: 70, confidence: 0.9, details: {} });
+      }
+      extractedLinks.push({ id: `link-auto-${Date.now()}-${idx}`, source: `acct-${String(rec.senderAcc || "").replace(/\D/g, "")}`, target: `acct-${String(rec.receiverAcc || "").replace(/\D/g, "")}`, relationType: "FUNDS_TRANSFER", confidence: 0.9, details: { amount: rec.amount } });
+    });
+    extractedNodes = Array.from(nodeMap.values());
+  } else if (textToProcess.trim()) {
+    try {
+      const nlp = await extractEntitiesUniversal(textToProcess, ev.file_name);
+      extractedNodes = nlp.nodes || [];
+      extractedLinks = nlp.links || [];
+    } catch {
+      const out = extractEntitiesRuleBased(textToProcess);
+      extractedNodes = out.nodes || [];
+      extractedLinks = out.links || [];
+    }
+  }
+  await db.evidence.updateOne(ev._id, {
+    status: "VALIDATED",
+    extracted_entities_count: extractedNodes.length,
+    extracted_relations_count: extractedLinks.length,
+    extracted_entities: extractedNodes,
+    extracted_relations: extractedLinks,
+  });
+  const { stageCandidates } = await import("../services/stagingService");
+  const { batchId } = await stageCandidates({
+    caseId,
+    source: ev.file_type === "CDR_CSV" || ev.file_type === "FINANCIAL_CSV" ? ev.file_type : "FIR",
+    fileName: ev.file_name,
+    entities: extractedNodes.map((n: any) => ({
+      label: n.label, type: n.type, role: n.role || "Investigative Subject",
+      riskScore: n.riskScore || 75, confidence: n.confidence || 0.9,
+      details: n.details || {}, evidenceRef: ev._id,
+    })),
+    links: extractedLinks.map((l: any) => ({
+      sourceLabel: typeof l.source === "object" ? l.source.label || l.source.id : String(l.source),
+      targetLabel: typeof l.target === "object" ? l.target.label || l.target.id : String(l.target),
+      relationType: l.relationType || "ASSOCIATED_WITH", weight: l.weight || 0.8,
+      details: l.details || `Auto-extracted from ${ev.file_name}`, evidenceRef: ev._id,
+    })),
+    actor: actor as any,
+    note: note || `SAHAYAK auto-extract on upload by ${actor.name}`,
+    content: (ev as any).raw_text,
+  });
+  await db.evidence.updateOne(ev._id, { status: "COMMITTED" });
+  return { batchId, entities: extractedNodes.length, links: extractedLinks.length };
+}
 
 // List authorized cases for current user with membership metadata (dept-scoped admins)
 router.get("/", async (req: AuthenticatedRequest, res: Response) => {
@@ -22,8 +118,7 @@ router.get("/", async (req: AuthenticatedRequest, res: Response) => {
     const tenure = tenureKey(user.role, user.state);
     const scoped = allCases.filter((c: any) => {
       if (!c?.org || c.org === "UNKNOWN") return true;
-      const ct = c.org === "POLICE" ? `POLICE:${String(c.state || "POLICE").toUpperCase()}` : String(c.org).toUpperCase();
-      return ct === tenure;
+      return caseTenureOf(c) === tenure;
     });
     for (const c of scoped) {
       const members = await db.case_members.find({ case_id: c.id });
@@ -81,14 +176,10 @@ router.get("/available", async (req: AuthenticatedRequest, res: Response) => {
 
       const adminScoped = isAdmin(user.role)
         ? (() => {
-            const tenure = tenureKey(user.role, user.state);
-            if (!c?.org || c.org === "UNKNOWN") return true;
-            const ct =
-              c.org === "POLICE"
-                ? `POLICE:${String(c.state || "POLICE").toUpperCase()}`
-                : String(c.org).toUpperCase();
-            return ct === tenure;
-          })()
+          const tenure = tenureKey(user.role, user.state);
+          if (!c?.org || c.org === "UNKNOWN") return true;
+          return caseTenureOf(c) === tenure;
+        })()
         : false;
       const hasAccess = adminScoped || (mem !== undefined && mem.status === "ACTIVE");
 
@@ -126,8 +217,8 @@ router.get("/my-access-requests", async (req: AuthenticatedRequest, res: Respons
 // ---------------------------------------------------------------------------
 router.get("/shared/inbox", async (req: AuthenticatedRequest, res: Response) => {
   const user = req.user!;
-  if (orgOf(user.role) !== "POLICE" || !user.state) {
-    res.status(403).json({ error: "The interstate bridge is available to State Police officers only." });
+  if (!isStatewiseOrg(orgOf(user.role)) || !user.state) {
+    res.status(403).json({ error: "The interstate bridge is available to State Police / CID officers only." });
     return;
   }
   const myState = user.state.toUpperCase();
@@ -147,8 +238,7 @@ router.get("/shared/inbox", async (req: AuthenticatedRequest, res: Response) => 
       .filter((e) => {
         const c = caseMap.get(e.case_id);
         if (!c || !c.org) return true;
-        const ct = c.org === "POLICE" ? `POLICE:${String(c.state || "POLICE").toUpperCase()}` : String(c.org).toUpperCase();
-        return ct !== myTenure;
+        return caseTenureOf(c) !== myTenure;
       })
       .map((e) => ({
         id: e._id,
@@ -163,10 +253,7 @@ router.get("/shared/inbox", async (req: AuthenticatedRequest, res: Response) => 
         sharedAt: e.sharedAt,
         case_id: e.case_id,
         caseCode: caseMap.get(e.case_id)?.codeName,
-        originTenure:
-          caseMap.get(e.case_id)?.org === "POLICE"
-            ? `POLICE:${String(caseMap.get(e.case_id)?.state || "POLICE").toUpperCase()}`
-            : String(caseMap.get(e.case_id)?.org || "UNKNOWN").toUpperCase(),
+        originTenure: caseTenureOf(caseMap.get(e.case_id) || {}),
       })),
   });
 });
@@ -192,10 +279,7 @@ router.post("/:caseId/request-access", async (req: AuthenticatedRequest, res: Re
   // SHARED/UNKNOWN legacy cases remain requestable; tagged cases enforce tenure.
   if ((caseObj as any).org && (caseObj as any).org !== "UNKNOWN") {
     const userTenure = tenureKey(user.role, user.state);
-    const caseTenure =
-      (caseObj as any).org === "POLICE"
-        ? `POLICE:${String((caseObj as any).state || "POLICE").toUpperCase()}`
-        : String((caseObj as any).org).toUpperCase();
+    const caseTenure = caseTenureOf(caseObj);
     if (caseTenure !== userTenure) {
       res.status(403).json({
         error: "Tenant Isolation",
@@ -385,9 +469,10 @@ router.post("/", requireRole([...ADMIN_ROLES] as DBRole[]), async (req: Authenti
 
 // ---------------------------------------------------------------------------
 // Phase 8 Req32 — full-case archive import: initializes a NEW server-side case
-// from an exported JSON container (graph + evidence records). ADMIN-only.
+// from an exported JSON container (graph + evidence records). Admins and
+// Leads only; the new container inherits the creator's tenure.
 // ---------------------------------------------------------------------------
-router.post("/import", requireRole([...ADMIN_ROLES] as DBRole[]), async (req: AuthenticatedRequest, res: Response) => {
+router.post("/import", requireRole([...ADMIN_ROLES, ...LEAD_ROLES] as DBRole[]), async (req: AuthenticatedRequest, res: Response) => {
   const admin = req.user!;
   const { caseMetadata, graphData, evidenceRecords } = req.body as {
     caseMetadata?: any;
@@ -419,6 +504,8 @@ router.post("/import", requireRole([...ADMIN_ROLES] as DBRole[]), async (req: Au
     org,
     state: admin.state,
     importedFrom: caseMetadata.codeName,
+    imported_by_name: admin.name,
+    imported_by_role: admin.role,
     created_by: admin._id,
     created_at: now,
   };
@@ -562,10 +649,7 @@ router.post(
       return;
     }
     if (caseObj.org && caseObj.org !== "UNKNOWN") {
-      const ct =
-        caseObj.org === "POLICE"
-          ? `POLICE:${String(caseObj.state || "POLICE").toUpperCase()}`
-          : String(caseObj.org).toUpperCase();
+      const ct = caseTenureOf(caseObj);
       const mt = tenureKey(target.role, target.state);
       if (ct !== "SHARED" && mt !== ct) {
         res.status(403).json({
@@ -606,6 +690,45 @@ router.post(
       actor_role: caller.role,
     });
     res.status(201).json({ success: true, member });
+  }
+);
+
+// Lead remove member: the case Lead may drop anyone from their own case
+// roster except department Admins and themselves (cross-posted / joint
+// hands included — command prerogative on own container).
+router.post(
+  "/:caseId/members/lead-remove",
+  requireCaseMembership,
+  requireEditAccess,
+  requireRole([...ADMIN_ROLES, ...LEAD_ROLES] as DBRole[]),
+  async (req: AuthenticatedRequest, res: Response) => {
+    const { caseId } = req.params;
+    const { userId } = req.body;
+    const caller = req.user!;
+
+    if (userId === caller._id) {
+      res.status(400).json({ error: "You cannot remove yourself from the case." });
+      return;
+    }
+    const membership = await db.case_members.findOne({ case_id: caseId, user_id: userId });
+    if (!membership) {
+      res.status(404).json({ error: "Officer is not a member of this case." });
+      return;
+    }
+    if (String(membership.role).endsWith("_ADMIN")) {
+      res.status(403).json({ error: "Department Admins can only be removed by another Admin." });
+      return;
+    }
+    await db.case_members.deleteByCaseAndUser(caseId, userId);
+    broadcastCaseUpdate(caseId, {
+      event_type: "TEAM_UPDATED",
+      title: "Team updated",
+      message: `${membership.user_name} removed by ${caller.name}.`,
+      changes: {},
+      actor_name: caller.name,
+      actor_role: caller.role,
+    });
+    res.json({ success: true });
   }
 );
 
@@ -923,17 +1046,51 @@ router.post(
       res.status(403).json({ error: "Tenant Isolation", message: "Requisition is outside your tenure." });
       return;
     }
+    let assignedName: string | undefined;
+    const { assigneeId } = req.body || {};
+    if (assigneeId) {
+      const target = await db.users.findOne({ _id: assigneeId });
+      if (!target || target.status !== "ACTIVE") {
+        res.status(400).json({ error: "Assignee must be an ACTIVE registered officer." });
+        return;
+      }
+      if (!sameTenure(admin.role, admin.state, target.role, target.state)) {
+        res.status(403).json({ error: "Tenant Isolation", message: "Assignee is outside your tenure." });
+        return;
+      }
+      const already = await db.case_members.findOne({ case_id: doc.case_id, user_id: target._id });
+      if (!already) {
+        await db.case_members.insertOne({
+          _id: `mem-${doc.case_id}-${target._id}-req`,
+          case_id: doc.case_id,
+          user_id: target._id,
+          user_name: target.name,
+          user_email: target.email,
+          official_id: target.official_id,
+          agency: target.agency,
+          role: target.role,
+          state: target.state,
+          access: "FULL_EDIT",
+          status: "ACTIVE",
+          assigned_at: new Date().toISOString(),
+          assigned_by: admin.name,
+        });
+        assignedName = target.name;
+      }
+    }
     const now = new Date().toISOString();
     await db.requisitions.updateOne(reqId, { status: "APPROVED", reviewed_by: admin.name, reviewed_at: now, review_notes: req.body?.notes });
     broadcastCaseUpdate(doc.case_id, {
       event_type: "REQUISITION_DECIDED",
       title: "Requisition approved",
-      message: `${admin.name} approved ${doc.count}× ${doc.functional} for ${doc.case_code}.`,
+      message: assignedName
+        ? `${admin.name} approved ${doc.count}× ${doc.functional} for ${doc.case_code} and seated ${assignedName}.`
+        : `${admin.name} approved ${doc.count}× ${doc.functional} for ${doc.case_code}.`,
       changes: {},
       actor_name: admin.name,
       actor_role: admin.role,
     });
-    res.json({ success: true });
+    res.json({ success: true, assigned: assignedName });
   }
 );
 
@@ -1042,392 +1199,518 @@ router.post(
   "/:caseId/evidence",
   requireCaseMembership,
   requireEditAccess,
-  requireFunctional(["ADMIN", "FIELD", "FORENSIC", "CYBER"]),
+  requireFunctional(["ADMIN", "LEAD", "FIELD", "FORENSIC", "CYBER"]),
   async (req: AuthenticatedRequest, res: Response) => {
-  const { caseId } = req.params;
-  const {
-    fileName,
-    fileType,
-    fileSize,
-    fileSizeFormatted,
-    sourceAuthority,
-    rawText,
-    summary,
-  } = req.body;
+    const { caseId } = req.params;
+    const {
+      fileName,
+      fileType,
+      fileSize,
+      fileSizeFormatted,
+      sourceAuthority,
+      rawText,
+      summary,
+    } = req.body;
 
-  if (!fileName || !fileType) {
-    res.status(400).json({ error: "fileName and fileType are required" });
-    return;
-  }
+    if (!fileName || !fileType) {
+      res.status(400).json({ error: "fileName and fileType are required" });
+      return;
+    }
 
-  const user = req.user!;
-  const evId = `EVID-${Date.now().toString().slice(-6)}`;
-  const now = new Date().toISOString();
+    const user = req.user!;
+    const evId = `EVID-${Date.now().toString().slice(-6)}`;
+    const now = new Date().toISOString();
 
-  // Compute cryptographic SHA-256 hash for chain of custody
-  const contentToHash = rawText || `${fileName}:${fileSize}:${Date.now()}:${sourceAuthority}`;
-  const fileHash = `sha256:${crypto.createHash("sha256").update(contentToHash).digest("hex")}`;
+    // Compute cryptographic SHA-256 hash for chain of custody
+    const contentToHash = rawText || `${fileName}:${fileSize}:${Date.now()}:${sourceAuthority}`;
+    const fileHash = `sha256:${crypto.createHash("sha256").update(contentToHash).digest("hex")}`;
 
-  const evidenceRecord: DBEvidence = {
-    _id: evId,
-    case_id: caseId,
-    file_name: fileName,
-    file_size: fileSize || 1024000,
-    file_size_formatted: fileSizeFormatted || "1.02 MB",
-    file_type: fileType,
-    file_hash: fileHash,
-    uploaded_at: now,
-    uploaded_by: user.name,
-    uploader_role: user.role,
-    status: "UPLOADED",
-    source_authority: sourceAuthority || `${user.agency} Evidence Locker`,
-    summary: summary || `Ingested ${fileName} by ${user.name} (${user.role}).`,
-    raw_text: rawText,
-    extracted_entities_count: 0,
-    extracted_relations_count: 0,
-  };
+    const evidenceRecord: DBEvidence = {
+      _id: evId,
+      case_id: caseId,
+      file_name: fileName,
+      file_size: fileSize || 1024000,
+      file_size_formatted: fileSizeFormatted || "1.02 MB",
+      file_type: fileType,
+      file_hash: fileHash,
+      uploaded_at: now,
+      uploaded_by: user.name,
+      uploader_role: user.role,
+      status: "UPLOADED",
+      source_authority: sourceAuthority || `${user.agency} Evidence Locker`,
+      summary: summary || `Ingested ${fileName} by ${user.name} (${user.role}).`,
+      raw_text: rawText,
+      extracted_entities_count: 0,
+      extracted_relations_count: 0,
+    };
 
-  await db.evidence.insertOne(evidenceRecord);
+    await db.evidence.insertOne(evidenceRecord);
 
-  // Record audit log
-  await db.audit_logs.insertOne({
-    _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-    timestamp: now,
-    user_id: user._id,
-    user_name: user.name,
-    user_role: user.role,
-    action: "INGEST_EVIDENCE_UPLOAD",
-    case_id: caseId,
-    resource_id: evId,
-    target_label: fileName,
-    details: `Officer ${user.name} uploaded evidence exhibit ${fileName} (${evidenceRecord.file_size_formatted}) with SHA-256 fingerprint ${fileHash}.`,
-    digital_hash: fileHash,
-    result: "SUCCESS",
+    // Record audit log
+    await db.audit_logs.insertOne({
+      _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      timestamp: now,
+      user_id: user._id,
+      user_name: user.name,
+      user_role: user.role,
+      action: "INGEST_EVIDENCE_UPLOAD",
+      case_id: caseId,
+      resource_id: evId,
+      target_label: fileName,
+      details: `Officer ${user.name} uploaded evidence exhibit ${fileName} (${evidenceRecord.file_size_formatted}) with SHA-256 fingerprint ${fileHash}.`,
+      digital_hash: fileHash,
+      result: "SUCCESS",
+    });
+
+    // Record Investigation Event
+    await db.investigation_events.insertOne({
+      _id: `ev-${Date.now()}`,
+      case_id: caseId,
+      event_type: "EVIDENCE_UPLOADED",
+      title: `Evidence Intake: ${fileName}`,
+      description: `Registered exhibit under custody with hash ${fileHash.slice(0, 18)}...`,
+      timestamp: now,
+      actor_id: user._id,
+      actor_name: user.name,
+      actor_role: user.role,
+    });
+
+    // Broadcast Realtime Update
+    broadcastCaseUpdate(caseId, {
+      event_type: "EVIDENCE_UPLOADED",
+      title: "New Evidence Uploaded",
+      message: `${user.name} (${user.role}) uploaded exhibit: ${fileName}`,
+      changes: { new_evidence: 1 },
+      evidence_id: evId,
+      actor_name: user.name,
+      actor_role: user.role,
+    });
+
+    // SAHAYAK auto-extract: exhibits carrying text immediately become staged
+    // candidates for Lead accept/reject — no manual triage step first.
+    let autoStaged: { batchId: string; entities: number; links: number } | null = null;
+    if ((rawText || "").trim()) {
+      try {
+        autoStaged = await extractAndStageExhibit(caseId, evidenceRecord, user);
+        await db.audit_logs.insertOne({
+          _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+          timestamp: now,
+          user_id: user._id,
+          user_name: user.name,
+          user_role: user.role,
+          action: "EVIDENCE_AUTO_STAGED",
+          case_id: caseId,
+          resource_id: evId,
+          target_label: fileName,
+          details: `SAHAYAK auto-extracted ${autoStaged.entities} entities + ${autoStaged.links} links from ${fileName} → batch ${autoStaged.batchId} for Lead review.`,
+          digital_hash: crypto.createHash("sha256").update(`${evId}:AUTOSTAGE:${now}`).digest("hex"),
+          result: "SUCCESS",
+        });
+        broadcastCaseUpdate(caseId, {
+          event_type: "STAGING_UPDATED",
+          title: "Upload Auto-Staged for Review",
+          message: `${fileName}: ${autoStaged.entities} entities + ${autoStaged.links} links awaiting Lead accept/reject.`,
+          changes: { new_entities: autoStaged.entities, new_relationships: autoStaged.links },
+          evidence_id: evId,
+          actor_name: user.name,
+          actor_role: user.role,
+        });
+      } catch (err: any) {
+        console.error(`[EVIDENCE] auto-extract failed for ${evId}: ${err.message}`);
+      }
+    }
+
+    const fresh = (await db.evidence.findOne(evId)) || evidenceRecord;
+    res.status(201).json({
+      success: true,
+      evidence: fresh,
+      autoStaged,
+    });
   });
-
-  // Record Investigation Event
-  await db.investigation_events.insertOne({
-    _id: `ev-${Date.now()}`,
-    case_id: caseId,
-    event_type: "EVIDENCE_UPLOADED",
-    title: `Evidence Intake: ${fileName}`,
-    description: `Registered exhibit under custody with hash ${fileHash.slice(0, 18)}...`,
-    timestamp: now,
-    actor_id: user._id,
-    actor_name: user.name,
-    actor_role: user.role,
-  });
-
-  // Broadcast Realtime Update
-  broadcastCaseUpdate(caseId, {
-    event_type: "EVIDENCE_UPLOADED",
-    title: "New Evidence Uploaded",
-    message: `${user.name} (${user.role}) uploaded exhibit: ${fileName}`,
-    changes: { new_evidence: 1 },
-    evidence_id: evId,
-    actor_name: user.name,
-    actor_role: user.role,
-  });
-
-  res.status(201).json({
-    success: true,
-    evidence: evidenceRecord,
-  });
-});
 
 // 2. Evidence Processing: PROCESSING -> VALIDATED Stage
 router.post(
   "/:caseId/evidence/:evidenceId/process",
   requireCaseMembership,
   requireEditAccess,
-  requireFunctional(["ADMIN", "FIELD", "FORENSIC", "CYBER"]),
+  requireFunctional(["ADMIN", "LEAD", "FIELD", "FORENSIC", "CYBER"]),
   async (req: AuthenticatedRequest, res: Response) => {
-  const { caseId, evidenceId } = req.params;
-  const { rawText, fileType } = req.body;
+    const { caseId, evidenceId } = req.params;
+    const { rawText, fileType } = req.body;
 
-  const ev = await db.evidence.findOne(evidenceId);
-  if (!ev) {
-    res.status(404).json({ error: "Evidence exhibit not found" });
-    return;
-  }
-
-  // Update to PROCESSING
-  await db.evidence.updateOne(evidenceId, { status: "PROCESSING" });
-
-  const textToProcess = rawText || ev.raw_text || "";
-  let extractedNodes: any[] = [];
-  let extractedLinks: any[] = [];
-  let summary = ev.summary;
-
-  try {
-    if (ev.file_type === "CDR_CSV" || fileType === "CDR_CSV") {
-      const cdrRecords = parseCDRCSV(textToProcess);
-      const nodeMap = new Map<string, any>();
-      const generatedLinks: any[] = [];
-
-      cdrRecords.forEach((rec, idx) => {
-        const aId = `phone-${rec.aParty.replace(/\D/g, "")}`;
-        const bId = `phone-${rec.bParty.replace(/\D/g, "")}`;
-
-        if (!nodeMap.has(aId)) {
-          nodeMap.set(aId, {
-            id: aId,
-            label: rec.aParty,
-            type: "PHONE",
-            riskScore: 65,
-            confidence: 0.95,
-            details: { phone: rec.aParty, imei: rec.imeiA, towerLocation: rec.towerLocation },
-          });
-        }
-        if (!nodeMap.has(bId)) {
-          nodeMap.set(bId, {
-            id: bId,
-            label: rec.bParty,
-            type: "PHONE",
-            riskScore: 60,
-            confidence: 0.9,
-            details: { phone: rec.bParty, imei: rec.imeiB, towerLocation: rec.towerLocation },
-          });
-        }
-        generatedLinks.push({
-          id: `link-cdr-${Date.now()}-${idx}`,
-          source: aId,
-          target: bId,
-          relationType: "CALLS",
-          confidence: 0.95,
-          evidenceCount: 1,
-          details: { durationSec: rec.durationSec, timestamp: rec.timestamp, towerId: rec.towerId },
-        });
-      });
-
-      extractedNodes = Array.from(nodeMap.values());
-      extractedLinks = generatedLinks;
-      summary = `Extracted ${extractedNodes.length} callers and ${extractedLinks.length} call records from CDR dump.`;
-    } else if (ev.file_type === "FINANCIAL_CSV" || fileType === "FINANCIAL_CSV") {
-      const finRecords = parseFinancialCSV(textToProcess);
-      const nodeMap = new Map<string, any>();
-      const generatedLinks: any[] = [];
-
-      finRecords.forEach((rec, idx) => {
-        const senderId = `acc-${rec.senderAcc.replace(/\W/g, "")}`;
-        const receiverId = `acc-${rec.receiverAcc.replace(/\W/g, "")}`;
-
-        if (!nodeMap.has(senderId)) {
-          nodeMap.set(senderId, {
-            id: senderId,
-            label: rec.senderName || rec.senderAcc,
-            type: "ACCOUNT",
-            riskScore: rec.isSmurfingFlag ? 85 : 55,
-            confidence: 0.95,
-            details: { accountNumber: rec.senderAcc, bankName: rec.bankName },
-          });
-        }
-        if (!nodeMap.has(receiverId)) {
-          nodeMap.set(receiverId, {
-            id: receiverId,
-            label: rec.receiverName || rec.receiverAcc,
-            type: "ACCOUNT",
-            riskScore: rec.isSmurfingFlag ? 85 : 55,
-            confidence: 0.95,
-            details: { accountNumber: rec.receiverAcc, bankName: rec.bankName },
-          });
-        }
-        generatedLinks.push({
-          id: `link-fin-${Date.now()}-${idx}`,
-          source: senderId,
-          target: receiverId,
-          relationType: "FINANCIAL_TRANSFER",
-          confidence: 0.98,
-          evidenceCount: 1,
-          details: { amount: rec.amount, mode: rec.mode, utr: rec.utrNumber, timestamp: rec.timestamp },
-        });
-      });
-
-      extractedNodes = Array.from(nodeMap.values());
-      extractedLinks = generatedLinks;
-      summary = `Extracted ${extractedNodes.length} accounts/entities and ${extractedLinks.length} financial transactions.`;
-    } else {
-      // FIR or narrative text
-      const nlpResult = await extractEntitiesWithGemini(textToProcess, ev.file_name);
-      extractedNodes = nlpResult.nodes;
-      extractedLinks = nlpResult.links;
-      summary = nlpResult.summary || summary;
+    const ev = await db.evidence.findOne(evidenceId);
+    if (!ev) {
+      res.status(404).json({ error: "Evidence exhibit not found" });
+      return;
     }
-  } catch (err: any) {
-    // Fallback to rule-based extractor
-    const fallback = extractEntitiesRuleBased(textToProcess);
-    extractedNodes = fallback.nodes;
-    extractedLinks = fallback.links;
-    summary = fallback.summary;
-  }
 
-  // Update status to VALIDATED and store extracted previews
-  const updatedEv = await db.evidence.updateOne(evidenceId, {
-    status: "VALIDATED",
-    extracted_entities_count: extractedNodes.length,
-    extracted_relations_count: extractedLinks.length,
-    extracted_entities: extractedNodes,
-    extracted_relations: extractedLinks,
-    summary,
-    quality_notes: "Validated via automated entity/relationship extraction engine. Ready for official case graph commitment.",
+    // Update to PROCESSING
+    await db.evidence.updateOne(evidenceId, { status: "PROCESSING" });
+
+    const textToProcess = rawText || ev.raw_text || "";
+    let extractedNodes: any[] = [];
+    let extractedLinks: any[] = [];
+    let summary = ev.summary;
+
+    try {
+      if (ev.file_type === "CDR_CSV" || fileType === "CDR_CSV") {
+        const cdrRecords = parseCDRCSV(textToProcess);
+        const nodeMap = new Map<string, any>();
+        const generatedLinks: any[] = [];
+
+        cdrRecords.forEach((rec, idx) => {
+          const aId = `phone-${rec.aParty.replace(/\D/g, "")}`;
+          const bId = `phone-${rec.bParty.replace(/\D/g, "")}`;
+
+          if (!nodeMap.has(aId)) {
+            nodeMap.set(aId, {
+              id: aId,
+              label: rec.aParty,
+              type: "PHONE",
+              riskScore: 65,
+              confidence: 0.95,
+              details: { phone: rec.aParty, imei: rec.imeiA, towerLocation: rec.towerLocation },
+            });
+          }
+          if (!nodeMap.has(bId)) {
+            nodeMap.set(bId, {
+              id: bId,
+              label: rec.bParty,
+              type: "PHONE",
+              riskScore: 60,
+              confidence: 0.9,
+              details: { phone: rec.bParty, imei: rec.imeiB, towerLocation: rec.towerLocation },
+            });
+          }
+          generatedLinks.push({
+            id: `link-cdr-${Date.now()}-${idx}`,
+            source: aId,
+            target: bId,
+            relationType: "CALLS",
+            confidence: 0.95,
+            evidenceCount: 1,
+            details: { durationSec: rec.durationSec, timestamp: rec.timestamp, towerId: rec.towerId },
+          });
+        });
+
+        extractedNodes = Array.from(nodeMap.values());
+        extractedLinks = generatedLinks;
+        summary = `Extracted ${extractedNodes.length} callers and ${extractedLinks.length} call records from CDR dump.`;
+      } else if (ev.file_type === "FINANCIAL_CSV" || fileType === "FINANCIAL_CSV") {
+        const finRecords = parseFinancialCSV(textToProcess);
+        const nodeMap = new Map<string, any>();
+        const generatedLinks: any[] = [];
+
+        finRecords.forEach((rec, idx) => {
+          const senderId = `acc-${rec.senderAcc.replace(/\W/g, "")}`;
+          const receiverId = `acc-${rec.receiverAcc.replace(/\W/g, "")}`;
+
+          if (!nodeMap.has(senderId)) {
+            nodeMap.set(senderId, {
+              id: senderId,
+              label: rec.senderName || rec.senderAcc,
+              type: "ACCOUNT",
+              riskScore: rec.isSmurfingFlag ? 85 : 55,
+              confidence: 0.95,
+              details: { accountNumber: rec.senderAcc, bankName: rec.bankName },
+            });
+          }
+          if (!nodeMap.has(receiverId)) {
+            nodeMap.set(receiverId, {
+              id: receiverId,
+              label: rec.receiverName || rec.receiverAcc,
+              type: "ACCOUNT",
+              riskScore: rec.isSmurfingFlag ? 85 : 55,
+              confidence: 0.95,
+              details: { accountNumber: rec.receiverAcc, bankName: rec.bankName },
+            });
+          }
+          generatedLinks.push({
+            id: `link-fin-${Date.now()}-${idx}`,
+            source: senderId,
+            target: receiverId,
+            relationType: "FINANCIAL_TRANSFER",
+            confidence: 0.98,
+            evidenceCount: 1,
+            details: { amount: rec.amount, mode: rec.mode, utr: rec.utrNumber, timestamp: rec.timestamp },
+          });
+        });
+
+        extractedNodes = Array.from(nodeMap.values());
+        extractedLinks = generatedLinks;
+        summary = `Extracted ${extractedNodes.length} accounts/entities and ${extractedLinks.length} financial transactions.`;
+      } else {
+        // FIR or narrative text — SAHAYAK model extraction (Groq per LLM_PROVIDER).
+        const nlpResult = await extractEntitiesUniversal(textToProcess, ev.file_name);
+        extractedNodes = nlpResult.nodes;
+        extractedLinks = nlpResult.links;
+        summary = nlpResult.summary || summary;
+      }
+    } catch (err: any) {
+      // Fallback to rule-based extractor
+      const fallback = extractEntitiesRuleBased(textToProcess);
+      extractedNodes = fallback.nodes;
+      extractedLinks = fallback.links;
+      summary = fallback.summary;
+    }
+
+    // Update status to VALIDATED and store extracted previews
+    const updatedEv = await db.evidence.updateOne(evidenceId, {
+      status: "VALIDATED",
+      extracted_entities_count: extractedNodes.length,
+      extracted_relations_count: extractedLinks.length,
+      extracted_entities: extractedNodes,
+      extracted_relations: extractedLinks,
+      summary,
+      quality_notes: "Validated via automated entity/relationship extraction engine. Ready for official case graph commitment.",
+    });
+
+    const user = req.user!;
+    const now = new Date().toISOString();
+
+    await db.audit_logs.insertOne({
+      _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      timestamp: now,
+      user_id: user._id,
+      user_name: user.name,
+      user_role: user.role,
+      action: "EVIDENCE_VALIDATED",
+      case_id: caseId,
+      resource_id: evidenceId,
+      target_label: ev.file_name,
+      details: `Processed and validated exhibit ${ev.file_name}. Generated ${extractedNodes.length} candidate entities and ${extractedLinks.length} candidate relationships.`,
+      digital_hash: crypto.createHash("sha256").update(`${evidenceId}:VALIDATED:${now}`).digest("hex"),
+      result: "SUCCESS",
+    });
+
+    res.json({
+      success: true,
+      evidence: updatedEv,
+      candidateNodes: extractedNodes,
+      candidateLinks: extractedLinks,
+    });
   });
-
-  const user = req.user!;
-  const now = new Date().toISOString();
-
-  await db.audit_logs.insertOne({
-    _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-    timestamp: now,
-    user_id: user._id,
-    user_name: user.name,
-    user_role: user.role,
-    action: "EVIDENCE_VALIDATED",
-    case_id: caseId,
-    resource_id: evidenceId,
-    target_label: ev.file_name,
-    details: `Processed and validated exhibit ${ev.file_name}. Generated ${extractedNodes.length} candidate entities and ${extractedLinks.length} candidate relationships.`,
-    digital_hash: crypto.createHash("sha256").update(`${evidenceId}:VALIDATED:${now}`).digest("hex"),
-    result: "SUCCESS",
-  });
-
-  res.json({
-    success: true,
-    evidence: updatedEv,
-    candidateNodes: extractedNodes,
-    candidateLinks: extractedLinks,
-  });
-});
 
 // 3. Evidence Commitment: VALIDATED -> COMMITTED Stage (Writes to Authoritative Case Graph)
 router.post(
   "/:caseId/evidence/:evidenceId/commit",
   requireCaseMembership,
   requireEditAccess,
-  requireFunctional(["ADMIN", "FIELD", "FORENSIC", "CYBER"]),
+  requireFunctional(["ADMIN", "LEAD", "FIELD", "FORENSIC", "CYBER"]),
   async (req: AuthenticatedRequest, res: Response) => {
-  const { caseId, evidenceId } = req.params;
-  const { entities, relationships } = req.body;
+    const { caseId, evidenceId } = req.params;
+    const { entities, relationships } = req.body;
 
-  const ev = await db.evidence.findOne(evidenceId);
-  if (!ev) {
-    res.status(404).json({ error: "Evidence exhibit not found" });
-    return;
+    const ev = await db.evidence.findOne(evidenceId);
+    if (!ev) {
+      res.status(404).json({ error: "Evidence exhibit not found" });
+      return;
+    }
+
+    const nodesToCommit = entities || ev.extracted_entities || [];
+    const linksToCommit = relationships || ev.extracted_relations || [];
+
+    const user = req.user!;
+    const now = new Date().toISOString();
+
+    // Forensic commits stage for Lead review — the exhibit stays sealed in the
+    // vault, but graph assertions wait for approval. Nothing writes the graph here.
+    const { stageCandidates } = await import("../services/stagingService");
+    const stagedEntities = nodesToCommit.map((n: any) => ({
+      label: n.label,
+      type: n.type,
+      role: n.role || "Investigative Subject",
+      riskScore: n.riskScore || 75,
+      confidence: n.confidence || 0.9,
+      details: { ...(n.details || {}), aliases: n.aliases || [] },
+      evidenceRef: evidenceId,
+      locator: n.locator,
+    }));
+    const stagedLinks = linksToCommit.map((l: any) => ({
+      sourceLabel: typeof l.source === "object" ? l.source.label || l.source.id : String(l.source),
+      targetLabel: typeof l.target === "object" ? l.target.label || l.target.id : String(l.target),
+      relationType: l.relationType || "ASSOCIATED_WITH",
+      weight: l.weight || 0.8,
+      frequency: l.frequency,
+      amount: l.amount,
+      details: l.details || `Extracted from exhibit ${ev.file_name}`,
+      evidenceRef: evidenceId,
+      locator: l.locator,
+    }));
+    const { batchId } = await stageCandidates({
+      caseId,
+      source: ev.file_type === "CDR_CSV" || ev.file_type === "FINANCIAL_CSV" ? ev.file_type : "FIR",
+      fileName: ev.file_name,
+      entities: stagedEntities,
+      links: stagedLinks,
+      actor: user,
+      note: `Staged from forensic exhibit ${ev.file_name} (${ev.file_type}).`,
+      content: (ev as any).raw_text,
+    });
+
+    // 3. Mark evidence status as COMMITTED (sealed in vault; graph pending review)
+    const updatedEv = await db.evidence.updateOne(evidenceId, {
+      status: "COMMITTED",
+      extracted_entities_count: stagedEntities.length,
+      extracted_relations_count: stagedLinks.length,
+    });
+
+    // 4. Investigation Event
+    await db.investigation_events.insertOne({
+      _id: `ev-${Date.now()}`,
+      case_id: caseId,
+      event_type: "EVIDENCE_STAGED",
+      title: `Intelligence Staged: ${ev.file_name}`,
+      description: `Staged ${stagedEntities.length} entities and ${stagedLinks.length} relationships for Lead review (batch ${batchId}).`,
+      timestamp: now,
+      actor_id: user._id,
+      actor_name: user.name,
+      actor_role: user.role,
+    });
+
+    // 5. Audit Log with SHA-256 Digest
+    const auditDigest = crypto
+      .createHash("sha256")
+      .update(`${evidenceId}:${stagedEntities.length}:${stagedLinks.length}:${now}`)
+      .digest("hex");
+
+    await db.audit_logs.insertOne({
+      _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      timestamp: now,
+      user_id: user._id,
+      user_name: user.name,
+      user_role: user.role,
+      action: "EVIDENCE_STAGED_FOR_REVIEW",
+      case_id: caseId,
+      resource_id: evidenceId,
+      target_label: ev.file_name,
+      details: `Officer ${user.name} staged ${stagedEntities.length} entities and ${stagedLinks.length} relationships from exhibit ${ev.file_name} for Lead review (batch ${batchId}).`,
+      digital_hash: `sha256:${auditDigest}`,
+      result: "SUCCESS",
+    });
+
+    // 6. Broadcast Real-time WebSocket Event to all case members
+    broadcastCaseUpdate(caseId, {
+      event_type: "STAGING_UPDATED",
+      title: "New Intake Staged for Review",
+      message: `${stagedEntities.length} entities and ${stagedLinks.length} relationships from ${ev.file_name} await Lead review in ${caseId}.`,
+      changes: {
+        new_evidence: 1,
+        new_entities: stagedEntities.length,
+        new_relationships: stagedLinks.length,
+        new_alerts: 1,
+      },
+      evidence_id: evidenceId,
+      actor_name: user.name,
+      actor_role: user.role,
+    });
+
+    await autoLogDiary(
+      caseId,
+      user,
+      `Evidence staged: exhibit ${ev.file_name} queued ${stagedEntities.length} entities and ${stagedLinks.length} relationships for Lead review (batch ${batchId}).`,
+      "EVIDENCE_COMMIT"
+    );
+
+    res.json({
+      success: true,
+      message: "Evidence staged for Lead review — it appears in the Intake Pipeline in real time.",
+      evidence: updatedEv,
+      committedEntitiesCount: stagedEntities.length,
+      committedRelationsCount: stagedLinks.length,
+      stagedBatchId: batchId,
+    });
+  });
+
+// ---------------------------------------------------------------------------
+// Lead evidence triage: raw exhibits (UPLOADED) awaiting approval/rejection.
+// APPROVE runs deterministic extraction and stages candidates for the graph
+// review queue; REJECT removes the exhibit from triage. Reviewers only.
+// ---------------------------------------------------------------------------
+router.post(
+  "/:caseId/evidence/:evidenceId/triage",
+  requireCaseMembership,
+  requireEditAccess,
+  requireRole([...ADMIN_ROLES, ...LEAD_ROLES] as DBRole[]),
+  async (req: AuthenticatedRequest, res: Response) => {
+    const { caseId, evidenceId } = req.params;
+    const { decision, note } = req.body as { decision?: string; note?: string };
+    const user = req.user!;
+    const now = new Date().toISOString();
+
+    const ev = await db.evidence.findOne(evidenceId);
+    if (!ev || ev.case_id !== caseId) {
+      res.status(404).json({ error: "Evidence exhibit not found in this case." });
+      return;
+    }
+    if (decision !== "APPROVE" && decision !== "REJECT") {
+      res.status(400).json({ error: "decision must be APPROVE or REJECT." });
+      return;
+    }
+    if (ev.status !== "UPLOADED" && ev.status !== "PROCESSING") {
+      res.status(400).json({ error: `Exhibit already ${ev.status} — triage applies to fresh uploads.` });
+      return;
+    }
+
+    if (decision === "REJECT") {
+      await db.evidence.updateOne(evidenceId, { status: "REJECTED" });
+      await db.audit_logs.insertOne({
+        _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+        timestamp: now,
+        user_id: user._id,
+        user_name: user.name,
+        user_role: user.role,
+        action: "EVIDENCE_TRIAGE_REJECTED",
+        case_id: caseId,
+        resource_id: evidenceId,
+        target_label: ev.file_name,
+        details: `${user.name} rejected exhibit ${ev.file_name} at triage.${note ? ` Note: ${note}` : ""}`,
+        digital_hash: crypto.createHash("sha256").update(`${evidenceId}:REJECT:${now}`).digest("hex"),
+        result: "SUCCESS",
+      });
+      broadcastCaseUpdate(caseId, {
+        event_type: "STAGING_UPDATED",
+        title: "Exhibit rejected at triage",
+        message: `${ev.file_name} rejected by ${user.name}; removed from triage.`,
+        changes: {},
+        evidence_id: evidenceId,
+        actor_name: user.name,
+        actor_role: user.role,
+      });
+      res.json({ success: true, status: "REJECTED" });
+      return;
+    }
+
+    // APPROVE — SAHAYAK auto-extract (shared helper) + stage for graph review.
+    const { batchId, entities: entityCount, links: linkCount } = await extractAndStageExhibit(
+      caseId, ev, user, `Triage-approved by ${user.name}${note ? `: ${note}` : ""}`
+    );
+    await db.audit_logs.insertOne({
+      _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      timestamp: now,
+      user_id: user._id,
+      user_name: user.name,
+      user_role: user.role,
+      action: "EVIDENCE_TRIAGE_APPROVED",
+      case_id: caseId,
+      resource_id: evidenceId,
+      target_label: ev.file_name,
+      details: `${user.name} approved ${ev.file_name} at triage → batch ${batchId} (${entityCount} entities).`,
+      digital_hash: crypto.createHash("sha256").update(`${evidenceId}:APPROVE:${now}`).digest("hex"),
+      result: "SUCCESS",
+    });
+    broadcastCaseUpdate(caseId, {
+      event_type: "STAGING_UPDATED",
+      title: "Exhibit triaged",
+      message: `${ev.file_name} approved → batch ${batchId} awaiting graph review.`,
+      changes: { new_entities: entityCount, new_relationships: linkCount },
+      evidence_id: evidenceId,
+      actor_name: user.name,
+      actor_role: user.role,
+    });
+    res.json({ success: true, status: "COMMITTED", batchId, entities: entityCount, links: linkCount });
   }
-
-  const nodesToCommit = entities || ev.extracted_entities || [];
-  const linksToCommit = relationships || ev.extracted_relations || [];
-
-  const user = req.user!;
-  const now = new Date().toISOString();
-
-  // Forensic commits stage for Lead review — the exhibit stays sealed in the
-  // vault, but graph assertions wait for approval. Nothing writes the graph here.
-  const { stageCandidates } = await import("../services/stagingService");
-  const stagedEntities = nodesToCommit.map((n: any) => ({
-    label: n.label,
-    type: n.type,
-    role: n.role || "Investigative Subject",
-    riskScore: n.riskScore || 75,
-    confidence: n.confidence || 0.9,
-    details: { ...(n.details || {}), aliases: n.aliases || [] },
-    evidenceRef: evidenceId,
-    locator: n.locator,
-  }));
-  const stagedLinks = linksToCommit.map((l: any) => ({
-    sourceLabel: typeof l.source === "object" ? l.source.label || l.source.id : String(l.source),
-    targetLabel: typeof l.target === "object" ? l.target.label || l.target.id : String(l.target),
-    relationType: l.relationType || "ASSOCIATED_WITH",
-    weight: l.weight || 0.8,
-    frequency: l.frequency,
-    amount: l.amount,
-    details: l.details || `Extracted from exhibit ${ev.file_name}`,
-    evidenceRef: evidenceId,
-    locator: l.locator,
-  }));
-  const { batchId } = await stageCandidates({
-    caseId,
-    source: ev.file_type === "CDR_CSV" || ev.file_type === "FINANCIAL_CSV" ? ev.file_type : "FIR",
-    fileName: ev.file_name,
-    entities: stagedEntities,
-    links: stagedLinks,
-    actor: user,
-    note: `Staged from forensic exhibit ${ev.file_name} (${ev.file_type}).`,
-    content: (ev as any).raw_text,
-  });
-
-  // 3. Mark evidence status as COMMITTED (sealed in vault; graph pending review)
-  const updatedEv = await db.evidence.updateOne(evidenceId, {
-    status: "COMMITTED",
-    extracted_entities_count: stagedEntities.length,
-    extracted_relations_count: stagedLinks.length,
-  });
-
-  // 4. Investigation Event
-  await db.investigation_events.insertOne({
-    _id: `ev-${Date.now()}`,
-    case_id: caseId,
-    event_type: "EVIDENCE_STAGED",
-    title: `Intelligence Staged: ${ev.file_name}`,
-    description: `Staged ${stagedEntities.length} entities and ${stagedLinks.length} relationships for Lead review (batch ${batchId}).`,
-    timestamp: now,
-    actor_id: user._id,
-    actor_name: user.name,
-    actor_role: user.role,
-  });
-
-  // 5. Audit Log with SHA-256 Digest
-  const auditDigest = crypto
-    .createHash("sha256")
-    .update(`${evidenceId}:${stagedEntities.length}:${stagedLinks.length}:${now}`)
-    .digest("hex");
-
-  await db.audit_logs.insertOne({
-    _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-    timestamp: now,
-    user_id: user._id,
-    user_name: user.name,
-    user_role: user.role,
-    action: "EVIDENCE_STAGED_FOR_REVIEW",
-    case_id: caseId,
-    resource_id: evidenceId,
-    target_label: ev.file_name,
-    details: `Officer ${user.name} staged ${stagedEntities.length} entities and ${stagedLinks.length} relationships from exhibit ${ev.file_name} for Lead review (batch ${batchId}).`,
-    digital_hash: `sha256:${auditDigest}`,
-    result: "SUCCESS",
-  });
-
-  // 6. Broadcast Real-time WebSocket Event to all case members
-  broadcastCaseUpdate(caseId, {
-    event_type: "STAGING_UPDATED",
-    title: "New Intake Staged for Review",
-    message: `${stagedEntities.length} entities and ${stagedLinks.length} relationships from ${ev.file_name} await Lead review in ${caseId}.`,
-    changes: {
-      new_evidence: 1,
-      new_entities: stagedEntities.length,
-      new_relationships: stagedLinks.length,
-      new_alerts: 1,
-    },
-    evidence_id: evidenceId,
-    actor_name: user.name,
-    actor_role: user.role,
-  });
-
-  await autoLogDiary(
-    caseId,
-    user,
-    `Evidence staged: exhibit ${ev.file_name} queued ${stagedEntities.length} entities and ${stagedLinks.length} relationships for Lead review (batch ${batchId}).`,
-    "EVIDENCE_COMMIT"
-  );
-
-  res.json({
-    success: true,
-    message: "Evidence staged for Lead review — it appears in the Intake Pipeline in real time.",
-    evidence: updatedEv,
-    committedEntitiesCount: stagedEntities.length,
-    committedRelationsCount: stagedLinks.length,
-    stagedBatchId: batchId,
-  });
-});
+);
 
 // ---------------------------------------------------------------------------
 // Phase 6 Req26 — State Police Lead approval flag: mirrors an approved exhibit
@@ -1439,64 +1722,64 @@ router.post(
   requireEditAccess,
   requireRole([...ADMIN_ROLES, ...LEAD_ROLES] as DBRole[]),
   async (req: AuthenticatedRequest, res: Response) => {
-  const { caseId, evidenceId } = req.params;
-  const { states } = req.body as { states?: string[] };
-  const caller = req.user!;
+    const { caseId, evidenceId } = req.params;
+    const { states } = req.body as { states?: string[] };
+    const caller = req.user!;
 
-  if (orgOf(caller.role) !== "POLICE") {
-    res.status(403).json({ error: "Cross-state sharing is a State Police bridge workflow." });
-    return;
-  }
-  const caseObj: any = await db.cases.findOne(caseId);
-  if (!caseObj) {
-    res.status(404).json({ error: "Case not found." });
-    return;
-  }
-  if (!sameTenure(caller.role, caller.state, `${caseObj.org || "POLICE"}_LEAD`, caseObj.state)) {
-    res.status(403).json({ error: "Tenant Isolation", message: "You may flag only your own tenure's exhibits." });
-    return;
-  }
-  const targets = [...new Set((states || []).map((s) => String(s).toUpperCase()))].filter(Boolean);
-  if (targets.length === 0) {
-    res.status(400).json({ error: "states[] (counter-state jurisdictions) is required." });
-    return;
-  }
-  if (targets.includes(String(caller.state || "").toUpperCase())) {
-    res.status(400).json({ error: "Cannot share with your own state." });
-    return;
-  }
-  const ev = await db.evidence.findOne(evidenceId);
-  if (!ev || ev.case_id !== caseId) {
-    res.status(404).json({ error: "Evidence exhibit not found in this case." });
-    return;
-  }
-  const now = new Date().toISOString();
-  const merged = [...new Set([...(ev.sharedTo || []), ...targets])];
-  await db.evidence.updateOne(evidenceId, { sharedTo: merged, sharedBy: caller.name, sharedAt: now });
-  await db.audit_logs.insertOne({
-    _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-    timestamp: now,
-    user_id: caller._id,
-    user_name: caller.name,
-    user_role: caller.role,
-    action: "EVIDENCE_SHARED_CROSS_STATE",
-    case_id: caseId,
-    resource_id: evidenceId,
-    target_label: ev.file_name,
-    details: `${caller.name} approved ${ev.file_name} for joint-jurisdiction use by ${merged.join(", ")}.`,
-    digital_hash: crypto.createHash("sha256").update(`${evidenceId}:${merged.join(",")}:${now}`).digest("hex"),
-    result: "SUCCESS",
-  });
-  broadcastCaseUpdate(caseId, {
-    event_type: "EVIDENCE_SHARED",
-    title: "Exhibit shared interstate",
-    message: `${ev.file_name} approved for ${merged.join(", ")} by ${caller.name}.`,
-    changes: {},
-    evidence_id: evidenceId,
-    actor_name: caller.name,
-    actor_role: caller.role,
-  });
-  res.json({ success: true, sharedTo: merged });
+    if (!isStatewiseOrg(orgOf(caller.role)) || !caller.state) {
+      res.status(403).json({ error: "Cross-state sharing is a State Police / CID bridge workflow (state jurisdiction required)." });
+      return;
+    }
+    const caseObj: any = await db.cases.findOne(caseId);
+    if (!caseObj) {
+      res.status(404).json({ error: "Case not found." });
+      return;
+    }
+    if (!sameTenure(caller.role, caller.state, `${caseObj.org || "POLICE"}_LEAD`, caseObj.state)) {
+      res.status(403).json({ error: "Tenant Isolation", message: "You may flag only your own tenure's exhibits." });
+      return;
+    }
+    const targets = [...new Set((states || []).map((s) => String(s).toUpperCase()))].filter(Boolean);
+    if (targets.length === 0) {
+      res.status(400).json({ error: "states[] (counter-state jurisdictions) is required." });
+      return;
+    }
+    if (targets.includes(String(caller.state || "").toUpperCase())) {
+      res.status(400).json({ error: "Cannot share with your own state." });
+      return;
+    }
+    const ev = await db.evidence.findOne(evidenceId);
+    if (!ev || ev.case_id !== caseId) {
+      res.status(404).json({ error: "Evidence exhibit not found in this case." });
+      return;
+    }
+    const now = new Date().toISOString();
+    const merged = [...new Set([...(ev.sharedTo || []), ...targets])];
+    await db.evidence.updateOne(evidenceId, { sharedTo: merged, sharedBy: caller.name, sharedAt: now });
+    await db.audit_logs.insertOne({
+      _id: `aud-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      timestamp: now,
+      user_id: caller._id,
+      user_name: caller.name,
+      user_role: caller.role,
+      action: "EVIDENCE_SHARED_CROSS_STATE",
+      case_id: caseId,
+      resource_id: evidenceId,
+      target_label: ev.file_name,
+      details: `${caller.name} approved ${ev.file_name} for joint-jurisdiction use by ${merged.join(", ")}.`,
+      digital_hash: crypto.createHash("sha256").update(`${evidenceId}:${merged.join(",")}:${now}`).digest("hex"),
+      result: "SUCCESS",
+    });
+    broadcastCaseUpdate(caseId, {
+      event_type: "EVIDENCE_SHARED",
+      title: "Exhibit shared interstate",
+      message: `${ev.file_name} approved for ${merged.join(", ")} by ${caller.name}.`,
+      changes: {},
+      evidence_id: evidenceId,
+      actor_name: caller.name,
+      actor_role: caller.role,
+    });
+    res.json({ success: true, sharedTo: merged });
   }
 );
 
@@ -1603,9 +1886,9 @@ router.patch("/:caseId/nodes/:nodeId/review", requireCaseMembership, requireEdit
   const { caseId, nodeId } = req.params;
   const { reviewState, note } = req.body;
 
-  const validStates = ["CONFIRMED", "REJECTED", "UNCERTAIN", "NEEDS_REVIEW"];
+  const validStates = ["CONFIRMED", "REJECTED", "NEEDS_REVIEW"];
   if (!validStates.includes(reviewState)) {
-    res.status(400).json({ error: "Invalid reviewState. Must be one of: CONFIRMED, REJECTED, UNCERTAIN, NEEDS_REVIEW" });
+    res.status(400).json({ error: "Invalid reviewState. Must be one of: CONFIRMED, REJECTED, NEEDS_REVIEW" });
     return;
   }
 
@@ -1620,6 +1903,48 @@ router.patch("/:caseId/nodes/:nodeId/review", requireCaseMembership, requireEdit
   }
 
   const previousState = entity.reviewState || "NEEDS_REVIEW";
+
+  // If rejecting a main graph entity, move it to the innocent pool
+  if (reviewState === "REJECTED") {
+    if (!note || String(note).trim().length < 5) {
+      res.status(400).json({ error: "A rejection reason (min 5 chars) is required — it follows the item to the Innocent pool." });
+      return;
+    }
+    await db.innocent_pool.insertOne({
+      _id: `pool-${entity._id}`,
+      case_id: caseId,
+      kind: "ENTITY",
+      label: entity.label,
+      snapshot: entity,
+      rejectionReason: String(note).trim(),
+      rejectedBy: user.name,
+      rejectedAt: now,
+      source: "MAIN_GRAPH_REJECTION",
+      batchId: undefined,
+      readded: false,
+    });
+    // Remove from main graph
+    await db.entities.deleteOne(entity._id);
+    // Also remove connected links
+    const connectedLinks = await db.relationships.find({ case_id: caseId });
+    for (const link of connectedLinks) {
+      if (link.source === entity.id || link.target === entity.id) {
+        await db.relationships.deleteOne(link._id);
+      }
+    }
+    // Recompute graph analytics
+    const updatedEntities = await db.entities.find({ case_id: caseId });
+    const updatedLinks = await db.relationships.find({ case_id: caseId });
+    const { analyzedNodes, communities, cutVertices } = computeGraphAnalytics(toGraphNodes(updatedEntities), toGraphLinks(updatedLinks));
+    await broadcastCaseUpdate(caseId, {
+      event_type: "GRAPH_RECOMPUTED",
+      title: "Graph Recomputed After Rejection",
+      message: `Entity "${entity.label}" rejected — graph analytics updated.`,
+      changes: { nodes: analyzedNodes.length, links: updatedLinks.length },
+      actor_name: user.name,
+      actor_role: user.role,
+    });
+  }
 
   // Update entity review state
   const updatedEntity = await db.entities.updateOne(entity._id, {
@@ -1676,9 +2001,9 @@ router.patch("/:caseId/links/:linkId/review", requireCaseMembership, requireEdit
   const { caseId, linkId } = req.params;
   const { reviewState, note } = req.body;
 
-  const validStates = ["CONFIRMED", "REJECTED", "UNCERTAIN", "NEEDS_REVIEW"];
+  const validStates = ["CONFIRMED", "REJECTED", "NEEDS_REVIEW"];
   if (!validStates.includes(reviewState)) {
-    res.status(400).json({ error: "Invalid reviewState. Must be one of: CONFIRMED, REJECTED, UNCERTAIN, NEEDS_REVIEW" });
+    res.status(400).json({ error: "Invalid reviewState. Must be one of: CONFIRMED, REJECTED, NEEDS_REVIEW" });
     return;
   }
 
@@ -1694,6 +2019,46 @@ router.patch("/:caseId/links/:linkId/review", requireCaseMembership, requireEdit
   }
 
   const previousState = relationship.reviewState || "NEEDS_REVIEW";
+
+  // If rejecting a main graph link, move it to the innocent pool
+  if (reviewState === "REJECTED") {
+    if (!note || String(note).trim().length < 5) {
+      res.status(400).json({ error: "A rejection reason (min 5 chars) is required — it follows the item to the Innocent pool." });
+      return;
+    }
+    // Look up labels for the innocent pool label
+    const allEntities = await db.entities.find({ case_id: caseId });
+    const byId = new Map(allEntities.map((e) => [e.id, e.label]));
+    const srcLabel = byId.get(typeof relationship.source === "string" ? relationship.source : (relationship.source as any)?.id || "") || "";
+    const tgtLabel = byId.get(typeof relationship.target === "string" ? relationship.target : (relationship.target as any)?.id || "") || "";
+    await db.innocent_pool.insertOne({
+      _id: `pool-${relationship._id}`,
+      case_id: caseId,
+      kind: "LINK",
+      label: `${srcLabel} [${relationship.relationType}] ${tgtLabel}`,
+      snapshot: relationship,
+      rejectionReason: String(note).trim(),
+      rejectedBy: user.name,
+      rejectedAt: now,
+      source: "MAIN_GRAPH_REJECTION",
+      batchId: undefined,
+      readded: false,
+    });
+    // Remove from main graph
+    await db.relationships.deleteOne(relationship._id);
+    // Recompute graph analytics
+    const updatedEntities = await db.entities.find({ case_id: caseId });
+    const updatedLinks = await db.relationships.find({ case_id: caseId });
+    const { analyzedNodes, communities, cutVertices } = computeGraphAnalytics(toGraphNodes(updatedEntities), toGraphLinks(updatedLinks));
+    await broadcastCaseUpdate(caseId, {
+      event_type: "GRAPH_RECOMPUTED",
+      title: "Graph Recomputed After Rejection",
+      message: `Link rejected — graph analytics updated.`,
+      changes: { nodes: analyzedNodes.length, links: updatedLinks.length },
+      actor_name: user.name,
+      actor_role: user.role,
+    });
+  }
 
   // Update relationship review state
   const updatedRelationship = await db.relationships.updateOne(relationship._id, {

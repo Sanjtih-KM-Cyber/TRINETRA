@@ -16,11 +16,11 @@ import {
 } from "../types";
 import {
   extractEntitiesRuleBased,
-  extractEntitiesWithGemini,
   parseCDRCSV,
   parseFinancialCSV,
   generateFileHash,
 } from "../services/nlpExtractor";
+import { sahayakApi } from "../services/api";
 import {
   ingestOSINT,
   validateOSINTUrl,
@@ -146,53 +146,45 @@ munshi.trade@oksbi,Rameshwar Joshi,49201928371,Goa Safehouse Logistics,450000,20
   const [isIntelIngesting, setIsIntelIngesting] = useState(false);
   const [intelResult, setIntelResult] = useState<{ success: boolean; nodes: CrimeNetworkNode[]; links: CrimeNetworkLink[]; error?: string } | null>(null);
 
-  // Handlers for FIR Extraction
-  const handleExtractWithAI = async () => {
-    if (!firText.trim()) return;
-    setIsExtracting(true);
-    try {
-      const res = await extractEntitiesWithGemini(firText, "FIR Police Report");
-      // Stamp the hash into all extracted nodes and links
-      const docHash = generateFileHash(firText, "FIR_209_SpecialCell_CrimeBranch.pdf");
-      const stampedNodes = res.nodes.map(node => ({
-        ...node,
-        sourceDocumentIds: [docHash],
-        sourceSnippets: node.sourceSnippets?.map(s => ({ ...s, docId: docHash })) || [],
-      }));
-      const stampedLinks = res.links.map(link => ({
-        ...link,
-        sourceDocumentId: docHash,
-        evidenceDetail: link.evidenceDetail ? { ...link.evidenceDetail, sourceDocumentId: docHash } : undefined,
-      }));
-      setExtractedNodes(stampedNodes);
-      setExtractedLinks(stampedLinks);
-      setExtractionSummary(res.summary);
-      setDetectedSignals(res.suspiciousSignals);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsExtracting(false);
-    }
-  };
+  // Handlers for FIR Extraction — SAHAYAK model extraction (Groq-backed).
+  // Tabular CDR/financial dumps keep their deterministic parsers; narrative
+  // text goes to the live model with honest errors (no mock entities).
+  const [extractEngine, setExtractEngine] = useState<string | null>(null);
+  const [extractError, setExtractError] = useState<string | null>(null);
 
-  const handleExtractRuleBased = () => {
-    if (!firText.trim()) return;
-    const res = extractEntitiesRuleBased(firText);
-    const docHash = generateFileHash(firText, "FIR_209_SpecialCell_CrimeBranch.pdf");
-    const stampedNodes = res.nodes.map(node => ({
+  const stamp = (res: { nodes: CrimeNetworkNode[]; links: CrimeNetworkLink[] }, docHash: string, file: string) => {
+    const stampedNodes = res.nodes.map((node) => ({
       ...node,
       sourceDocumentIds: [docHash],
-      sourceSnippets: node.sourceSnippets?.map(s => ({ ...s, docId: docHash })) || [],
+      sourceSnippets: node.sourceSnippets?.map((s) => ({ ...s, docId: docHash })) || [],
     }));
-    const stampedLinks = res.links.map(link => ({
+    const stampedLinks = res.links.map((link) => ({
       ...link,
       sourceDocumentId: docHash,
       evidenceDetail: link.evidenceDetail ? { ...link.evidenceDetail, sourceDocumentId: docHash } : undefined,
     }));
-    setExtractedNodes(stampedNodes);
-    setExtractedLinks(stampedLinks);
-    setExtractionSummary(res.summary);
-    setDetectedSignals(res.suspiciousSignals);
+    return { stampedNodes, stampedLinks };
+  };
+
+  const handleExtractWithAI = async () => {
+    if (!firText.trim()) return;
+    setIsExtracting(true);
+    setExtractError(null);
+    try {
+      const res = await sahayakApi.extract(firText, "FIR Police Report");
+      setExtractEngine(`SAHAYAK · ${res.provider}/${res.model}`);
+      // Stamp the hash into all extracted nodes and links
+      const docHash = generateFileHash(firText, "FIR_209_SpecialCell_CrimeBranch.pdf");
+      const { stampedNodes, stampedLinks } = stamp(res, docHash, firText);
+      setExtractedNodes(stampedNodes);
+      setExtractedLinks(stampedLinks);
+      setExtractionSummary(res.summary);
+      setDetectedSignals(res.suspiciousSignals || []);
+    } catch (e: any) {
+      setExtractError(e.message || "SAHAYAK extraction failed.");
+    } finally {
+      setIsExtracting(false);
+    }
   };
 
   const handleCommitExtraction = () => {
@@ -502,18 +494,19 @@ munshi.trade@oksbi,Rameshwar Joshi,49201928371,Goa Safehouse Logistics,450000,20
                 className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-xs px-4 py-2.5 rounded-lg transition-colors flex items-center gap-2 shadow"
               >
                 <Sparkles className="w-4 h-4 text-indigo-200" />
-                <span>{isExtracting ? "Analyzing with Gemini AI..." : "Extract with Gemini AI"}</span>
+                <span>{isExtracting ? "Extracting with SAHAYAK…" : "Extract with SAHAYAK"}</span>
               </button>
-
-              <button
-                onClick={handleExtractRuleBased}
-                disabled={isExtracting}
-                className="bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs px-4 py-2.5 rounded-lg transition-colors flex items-center gap-2 border border-slate-700"
-              >
-                <Zap className="w-4 h-4 text-amber-400" />
-                <span>Instant Rule-Based NER Extractor</span>
-              </button>
+              {extractEngine && (
+                <span className="text-[10px] font-mono text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded px-2 py-1">
+                  {extractEngine}
+                </span>
+              )}
             </div>
+            {extractError && (
+              <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-300">
+                {extractError}
+              </div>
+            )}
           </div>
 
           {/* Extraction Preview & Merge Box */}
@@ -559,7 +552,7 @@ munshi.trade@oksbi,Rameshwar Joshi,49201928371,Goa Safehouse Logistics,450000,20
               ) : (
                 <div className="p-6 text-center text-slate-500 text-xs flex flex-col items-center justify-center h-48 border border-dashed border-slate-800 rounded-lg">
                   <Upload className="w-6 h-6 text-slate-600 mb-2" />
-                  <p>Click "Extract with Gemini AI" or "Instant Rule-Based" to parse the narrative above.</p>
+                  <p>Click "Extract with SAHAYAK" to parse the narrative above with the live model.</p>
                 </div>
               )}
             </div>
@@ -1207,8 +1200,8 @@ munshi.trade@oksbi,Rameshwar Joshi,49201928371,Goa Safehouse Logistics,450000,20
                 if (!intelDescription.trim()) return;
                 setIsIntelIngesting(true);
                 try {
-                  // Use existing extraction pipeline
-                  const res = await extractEntitiesWithGemini(intelDescription, "Intelligence Report");
+                  // SAHAYAK model extraction (Groq-backed)
+                  const res = await sahayakApi.extract(intelDescription, "Intelligence Report");
                   const docHash = generateFileHash(intelDescription, `Intel_Report_${Date.now()}.txt`);
                   const stampedNodes = res.nodes.map(node => ({
                     ...node,
@@ -1242,7 +1235,7 @@ munshi.trade@oksbi,Rameshwar Joshi,49201928371,Goa Safehouse Logistics,450000,20
                 if (!intelDescription.trim()) return;
                 setIsIntelIngesting(true);
                 try {
-                  const res = await extractEntitiesWithGemini(intelDescription, "Intelligence Report");
+                  const res = await sahayakApi.extract(intelDescription, "Intelligence Report");
                   const docHash = generateFileHash(intelDescription, `Intel_Report_${Date.now()}.txt`);
                   const stampedNodes = res.nodes.map(node => ({
                     ...node,

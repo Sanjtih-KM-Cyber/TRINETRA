@@ -86,6 +86,8 @@ export function broadcastCaseUpdate(caseId: string, payload: {
     new_entities?: number;
     new_relationships?: number;
     new_alerts?: number;
+    nodes?: number;
+    links?: number;
   };
   evidence_id?: string;
   actor_name?: string;
@@ -109,9 +111,23 @@ export function broadcastCaseUpdate(caseId: string, payload: {
   }
 }
 
+/** Targeted push to one officer (account-status / unblock notices). */
+export function pushToUser(userId: string, payload: Record<string, unknown>): void {
+  if (!wss) return;
+  const msg = JSON.stringify({ timestamp: new Date().toISOString(), ...payload });
+  for (const [ws, client] of clients.entries()) {
+    if (ws.readyState === WebSocket.OPEN && client.userId === userId) {
+      try {
+        ws.send(msg);
+      } catch {
+        /* ignore dead socket */
+      }
+    }
+  }
+}
+
 // Demo mode: broadcast simulated CCTNS tunnel events
-export function broadcastCctnsTunnelEvent(payload: {
-  stage: "HANDSHAKE" | "AUTHENTICATING" | "TUNNEL_ESTABLISHED" | "QUERY_SENT" | "RESPONSE_RECEIVED" | "ERROR";
+export function broadcastCctnsTunnelEvent(payload: {  stage: "HANDSHAKE" | "AUTHENTICATING" | "TUNNEL_ESTABLISHED" | "QUERY_SENT" | "RESPONSE_RECEIVED" | "ERROR";
   message: string;
   latencyMs?: number;
   packets?: number;

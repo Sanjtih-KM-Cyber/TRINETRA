@@ -119,11 +119,11 @@ router.post("/ask", async (req: AuthenticatedRequest, res: Response) => {
   try {
     const result = await sahayakAsk(caseId, String(question), { adapter, adhocContext });
     await auditRecord(caseId || "global", user, "SAHAYAK_ASK",
-      `${user.name} asked SAHAYAK${caseId ? ` on ${caseId}` : ""}: "${String(question).slice(0, 120)}" [${result.llmUsed ? result.provider : "rules engine"}].`,
+      `${user.name} asked SAHAYAK${caseId ? ` on ${caseId}` : ""}: "${String(question).slice(0, 120)}" [${result.provider}].`,
       "CASE", caseId, undefined, { llmUsed: result.llmUsed }, req.ip);
     res.json(result);
   } catch (err: any) {
-    res.status(400).json({ error: err.message || "SAHAYAK query failed." });
+    res.status(err.status || 400).json({ error: err.message || "SAHAYAK query failed." });
   }
 });
 

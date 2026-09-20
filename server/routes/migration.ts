@@ -1,7 +1,7 @@
 import { Router, Response } from "express";
 import { db, DBCaseMember, DBRole } from "../db";
 import { authenticateToken, requireRole, AuthenticatedRequest } from "../auth";
-import { ADMIN_ROLES, isLead, tenureKey, orgOf, type Org } from "../../src/data/roles";
+import { ADMIN_ROLES, isLead, tenureKey, caseTenureOf, isStatewiseOrg, orgOf, type Org } from "../../src/data/roles";
 import { broadcastCaseUpdate } from "../realtime";
 import { auditRecord } from "../services/diaryService";
 
@@ -10,8 +10,7 @@ router.use(authenticateToken);
 router.use(requireRole([...ADMIN_ROLES] as DBRole[]));
 
 function caseTenure(c: any): string {
-  if (!c?.org || c.org === "UNKNOWN") return "SHARED";
-  return c.org === "POLICE" ? `POLICE:${String(c.state || "POLICE").toUpperCase()}` : String(c.org).toUpperCase();
+  return caseTenureOf(c);
 }
 
 function orderRefOf(body: any): string | null {
@@ -38,9 +37,9 @@ router.post("/handover", async (req: AuthenticatedRequest, res: Response) => {
     res.status(400).json({ error: "toOrg must be one of CBI/NIA/CID/POLICE." });
     return;
   }
-  const targetState = targetOrg === "POLICE" ? String(toState || "").toUpperCase() : undefined;
-  if (targetOrg === "POLICE" && !targetState) {
-    res.status(400).json({ error: "toState is required for State Police handover." });
+  const targetState = isStatewiseOrg(targetOrg) ? String(toState || "").toUpperCase() : undefined;
+  if (isStatewiseOrg(targetOrg) && !targetState) {
+    res.status(400).json({ error: "toState is required for State Police / CID handover." });
     return;
   }
   const caseObj: any = await db.cases.findOne(caseId);
@@ -58,7 +57,7 @@ router.post("/handover", async (req: AuthenticatedRequest, res: Response) => {
     res.status(400).json({ error: "toAdminId must be an ACTIVE *_ADMIN officer." });
     return;
   }
-  const wantTenure = targetOrg === "POLICE" ? `POLICE:${targetState}` : targetOrg;
+  const wantTenure = isStatewiseOrg(targetOrg) ? `${targetOrg}:${targetState}` : targetOrg;
   if (tenureKey(incoming.role, incoming.state) !== wantTenure) {
     res.status(400).json({ error: `Incoming admin tenure '${tenureKey(incoming.role, incoming.state)}' does not match target '${wantTenure}'.` });
     return;
@@ -161,7 +160,8 @@ router.post("/escalate", requireRole(["CID_ADMIN"] as DBRole[]), async (req: Aut
 
   await db.cases.updateOne(caseId, {
     org: "CID",
-    migration: { path: "A_STATE_ESCALATION", from: `POLICE:${String(state || "POLICE").toUpperCase()}`, to: "CID", orderRef: ref, by: admin.name, at: now },
+    state: state || admin.state,
+    migration: { path: "A_STATE_ESCALATION", from: `POLICE:${String(state || "POLICE").toUpperCase()}`, to: `CID:${String(state || admin.state || "CID").toUpperCase()}`, orderRef: ref, by: admin.name, at: now },
   });
 
   // Police hands become read-only; CID command takes FULL_EDIT.
@@ -200,7 +200,7 @@ router.post("/escalate", requireRole(["CID_ADMIN"] as DBRole[]), async (req: Aut
     caseId,
     admin,
     "MIGRATION_ESCALATED",
-    `Path A escalation POLICE:${String(state || "?").toUpperCase()} → CID per ${ref}. Police hands set VIEW_ONLY; CID command FULL_EDIT.`,
+    `Path A escalation POLICE:${String(state || "?").toUpperCase()} → CID:${String(state || admin.state || "?").toUpperCase()} per ${ref}. Police hands set VIEW_ONLY; CID command FULL_EDIT.`,
     "CASE",
     caseId,
     caseObj.codeName,

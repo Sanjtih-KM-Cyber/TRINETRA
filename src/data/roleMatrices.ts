@@ -132,15 +132,15 @@ export const ROLE_MATRICES: Record<Org, OrgMatrix> = {
       staffingPrefix: "police_",
     },
     cyber: {
-      title: "State Police — via CID",
-      mandate: "State Police has no organic cyber cell; cyber work routes via the CID cyber unit.",
-      staffingPrefix: "cid_",
-      focus: ["Routed via CID cyber"],
+      title: "State Police Cyber Cell",
+      mandate: "District cyber unit: tower-dump ingestion, OSINT, UPI-mule tracing and device forensics.",
+      staffingPrefix: "police_",
+      focus: ["Tower dumps", "OSINT", "UPI mule trails"],
     },
     forensic: {
-      title: "State Police — via CID FSL",
-      mandate: "Forensics route via the state FSL under CID.",
-      staffingPrefix: "cid_",
+      title: "State Police Forensic Unit",
+      mandate: "District lab uploads: fingerprint matches, medico-legal reports and scene-examination notes.",
+      staffingPrefix: "police_",
     },
     field: {
       title: "Beat / Station Officers (mobile-first)",

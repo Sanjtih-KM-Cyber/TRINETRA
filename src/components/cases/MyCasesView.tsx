@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { caseApi } from "../../services/api";
 import { CaseDataset } from "../../types";
@@ -21,6 +21,7 @@ import {
   Layers,
   ChevronRight,
   Search,
+  Upload,
 } from "lucide-react";
 
 interface MyCasesViewProps {
@@ -51,6 +52,50 @@ export const MyCasesView: React.FC<MyCasesViewProps> = ({
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
   const [preselectedCaseId, setPreselectedCaseId] = useState<string | undefined>(undefined);
   const [searchQuery, setSearchQuery] = useState("");
+  const [importNotice, setImportNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
+
+  // Import a backup .json archive: initializes a new server-side case with all
+  // details intact (ADMIN-only server-side). Appears here in real time.
+  const handleImportFile = (file: File | undefined) => {
+    if (!file || isImporting) return;
+    setIsImporting(true);
+    setImportNotice(null);
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const parsed = JSON.parse(event.target?.result as string);
+        if (!parsed.caseMetadata?.name || !parsed.caseMetadata?.codeName || !Array.isArray(parsed.graphData?.nodes)) {
+          throw new Error("Invalid archive: need caseMetadata {name, codeName} and graphData.nodes[].");
+        }
+        const res = await caseApi.importArchive({
+          caseMetadata: parsed.caseMetadata,
+          graphData: { nodes: parsed.graphData.nodes, links: parsed.graphData.links || [] },
+          evidenceRecords: {
+            firs: parsed.evidenceRecords?.firs || [],
+            cdrs: parsed.evidenceRecords?.cdrs || [],
+            financials: parsed.evidenceRecords?.financials || [],
+            intels: parsed.evidenceRecords?.intels || [],
+            evidenceFiles: parsed.evidenceRecords?.evidenceFiles || [],
+          },
+          auditLogs: parsed.auditLogs || [],
+          version: parsed.version,
+        });
+        const c = res.imported;
+        setImportNotice({
+          ok: true,
+          text: `Case "${res.case.codeName}" restored with details intact (${c.nodes} entities, ${c.links} links, ${c.firs} FIRs, ${c.evidenceFiles} exhibits).`,
+        });
+        await loadData();
+      } catch (err: any) {
+        setImportNotice({ ok: false, text: err.message || "Import failed. Only Department Admins may import archives." });
+      } finally {
+        setIsImporting(false);
+      }
+    };
+    reader.readAsText(file);
+  };
 
   const loadData = async () => {
     setIsLoading(true);
@@ -118,6 +163,8 @@ export const MyCasesView: React.FC<MyCasesViewProps> = ({
 
   const authorizedList = availableCases.filter((c) => c.hasAccess);
   const otherCasesList = availableCases.filter((c) => !c.hasAccess);
+  // Admins control their tenure outright — never request access.
+  const isAdminUser = String(user?.role || "").endsWith("_ADMIN");
 
   const filteredAuthorized = authorizedList.filter((c) => {
     const q = searchQuery.toLowerCase();
@@ -192,14 +239,41 @@ export const MyCasesView: React.FC<MyCasesViewProps> = ({
             </button>
           )}
 
-          <button
-            onClick={() => handleOpenRequestModal()}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold transition-all"
-          >
-            <Plus className="w-3.5 h-3.5 stroke-[3] text-amber-400" />
-            <span className="hidden sm:inline">Request Case Access</span>
-            <span className="sm:hidden">Request</span>
-          </button>
+          {/* Archive import — restore a backup .json into this workspace (Admins + Leads, server-enforced). */}
+          {(String(user?.role || "").endsWith("_ADMIN") || String(user?.role || "").endsWith("_LEAD")) && (
+            <>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept=".json"
+                className="hidden"
+                onChange={(e) => {
+                  handleImportFile(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
+              <button
+                onClick={() => importInputRef.current?.click()}
+                disabled={isImporting}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-200 text-xs font-bold transition-all disabled:opacity-50"
+                title="Import Case File (.json backup) — restores all case data with details intact"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>{isImporting ? "Importing…" : "Import Case File"}</span>
+              </button>
+            </>
+          )}
+
+          {!isAdminUser && (
+            <button
+              onClick={() => handleOpenRequestModal()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold transition-all"
+            >
+              <Plus className="w-3.5 h-3.5 stroke-[3] text-amber-400" />
+              <span className="hidden sm:inline">Request Case Access</span>
+              <span className="sm:hidden">Request</span>
+            </button>
+          )}
 
           {onClose && (
             <button
@@ -222,6 +296,12 @@ export const MyCasesView: React.FC<MyCasesViewProps> = ({
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-8 space-y-8">
+        {importNotice && (
+          <div className={`p-4 rounded-2xl text-xs flex items-center gap-3 border ${importNotice.ok ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-rose-500/10 border-rose-500/30 text-rose-300"}`}>
+            {importNotice.ok ? <CheckCircle2 className="w-5 h-5 shrink-0" /> : <AlertTriangle className="w-5 h-5 shrink-0" />}
+            <span>{importNotice.text}</span>
+          </div>
+        )}
         {error && (
           <div className="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -286,21 +366,23 @@ export const MyCasesView: React.FC<MyCasesViewProps> = ({
               </div>
               <div className="max-w-md mx-auto">
                 <h3 className="text-sm font-bold text-slate-200 font-mono">
-                  No Active Case Clearance
+                  {isAdminUser ? "No Cases In Your Tenure Yet" : "No Active Case Clearance"}
                 </h3>
                 <p className="text-xs text-slate-400 mt-1.5">
-                  Your officer account is active, but you have not yet been granted membership to any
-                  case workspaces. Request access to begin contributing evidence or conducting
-                  investigations.
+                  {isAdminUser
+                    ? "Register your first case container with + New Case above — transferred cases will queue here for Lead assignment."
+                    : "Your officer account is active, but you have not yet been granted membership to any case workspaces. Request access to begin contributing evidence or conducting investigations."}
                 </p>
               </div>
-              <button
-                onClick={() => handleOpenRequestModal()}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition-all shadow-md shadow-amber-500/10"
-              >
-                <Plus className="w-4 h-4 stroke-[3]" />
-                <span>Request Case Access</span>
-              </button>
+              {!isAdminUser && (
+                <button
+                  onClick={() => handleOpenRequestModal()}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition-all shadow-md shadow-amber-500/10"
+                >
+                  <Plus className="w-4 h-4 stroke-[3]" />
+                  <span>Request Case Access</span>
+                </button>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
@@ -433,8 +515,8 @@ export const MyCasesView: React.FC<MyCasesViewProps> = ({
           </section>
         )}
 
-        {/* Section 3: Available System Operations Directory */}
-        {otherCasesList.length > 0 && (
+        {/* Section 3: Available System Operations Directory (officers only — Admins control their tenure outright) */}
+        {!isAdminUser && otherCasesList.length > 0 && (
           <section className="space-y-4 pt-4">
             <div className="flex items-center justify-between">
               <div>

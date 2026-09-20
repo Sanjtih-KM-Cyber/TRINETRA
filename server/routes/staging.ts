@@ -1,5 +1,5 @@
 import { Router, Response } from "express";
-import { db, DBUser } from "../db";
+import { db, DBUser, DBEntity, DBRelationship } from "../db";
 import {
   authenticateToken,
   requireCaseMembership,
@@ -23,6 +23,23 @@ import {
   auditRecord,
   notifyCase,
 } from "../services/diaryService";
+import { broadcastCaseUpdate } from "../realtime";
+import { computeGraphAnalytics } from "../../src/services/graphEngine";
+import { CrimeNetworkNode, CrimeNetworkLink } from "../../src/types";
+
+function toGraphNodes(entities: any[]): CrimeNetworkNode[] {
+  return entities.map((e) => ({
+    ...e,
+    type: e.type as CrimeNetworkNode["type"],
+  }));
+}
+function toGraphLinks(links: any[]): CrimeNetworkLink[] {
+  return links.map((l) => ({
+    ...l,
+    source: typeof l.source === "object" ? (l.source as any).id : l.source,
+    target: typeof l.target === "object" ? (l.target as any).id : l.target,
+  }));
+}
 
 const router = Router();
 router.use(authenticateToken);
@@ -69,7 +86,7 @@ router.post(
   "/:caseId/ingest",
   requireCaseMembership,
   requireEditAccess,
-  requireFunctional(["ADMIN", "FIELD", "FORENSIC", "CYBER"]),
+  requireFunctional(["ADMIN", "LEAD", "FIELD", "FORENSIC", "CYBER"]),
   async (req: AuthenticatedRequest, res: Response) => {
   const { caseId } = req.params;
   const user = req.user!;
@@ -92,6 +109,7 @@ router.post(
       actor: user,
       note: parsed.note,
       content: content || undefined,
+      readableContent: parsed.readable || undefined,
       unresolved: parsed.unresolved,
       enrichment: parsed.enrichment,
       provider: parsed.provider,
@@ -397,73 +415,86 @@ router.post("/:caseId/innocent-pool/:poolId/readd", requireCaseMembership, requi
   }
 
   const now = new Date().toISOString();
-  const newBatchId = `batch-${caseId}-${Date.now()}`;
-  await db.ingestion_batches.insertOne({
-    _id: newBatchId,
-    case_id: caseId,
-    source: item.source,
-    fileName: `Re-admission from Innocent pool (${item.label})`,
-    entityCount: item.kind === "ENTITY" ? 1 : 0,
-    linkCount: item.kind === "LINK" ? 1 : 0,
-    approvedCount: 0,
-    rejectedCount: 0,
-    pendingCount: 1,
-    status: "STAGED",
-    submittedBy: user.name,
-    submittedByRank: user.designation,
-    submittedAt: now,
-    hash: batchHash(caseId, `READD:${item.source}`, 1, user._id, now),
-  });
 
+  // Commit directly to main graph (not staging)
   if (item.kind === "ENTITY") {
     const s = item.snapshot;
-    await db.staged_entities.insertMany([{
-      _id: `se-${newBatchId}-0`,
+    const entity: DBEntity = {
+      _id: `ent-${caseId}-${s._id}`,
       case_id: caseId,
-      batchId: newBatchId,
-      source: item.source,
+      id: s.id,
       label: s.label,
       type: s.type,
+      category: s.category || "EVIDENCE",
+      reviewState: "CONFIRMED",
       role: s.role,
+      aliases: s.aliases || [],
       riskScore: s.riskScore ?? 50,
       confidence: s.confidence ?? 0.6,
-      details: s.details,
-      evidenceRef: s.evidenceRef,
-      locator: s.locator,
-      status: "PENDING",
-      submittedBy: user.name,
+      details: s.details || {},
+      evidence_ids: s.evidence_ids || [],
+      sourceDocumentIds: s.sourceDocumentIds || [],
       created_at: now,
-    }]);
+      updated_at: now,
+    };
+    await db.entities.insertOne(entity);
   } else {
     const s = item.snapshot;
-    await db.staged_links.insertMany([{
-      _id: `sl-${newBatchId}-0`,
+    const existingEntities = await db.entities.find({ case_id: caseId });
+    const byLabel = new Map(existingEntities.map((e) => [e.label.toLowerCase().trim(), e]));
+    const src = byLabel.get(s.sourceLabel.toLowerCase().trim());
+    const tgt = byLabel.get(s.targetLabel.toLowerCase().trim());
+    if (!src || !tgt) {
+      res.status(400).json({ error: `Cannot re-add link: endpoint not found on main graph. Approve entities first.` });
+      return;
+    }
+    const rel: DBRelationship = {
+      _id: `rel-${caseId}-${s._id}`,
       case_id: caseId,
-      batchId: newBatchId,
-      source: item.source,
-      sourceLabel: s.sourceLabel,
-      targetLabel: s.targetLabel,
+      id: s.id,
+      source: src.id,
+      target: tgt.id,
       relationType: s.relationType,
+      category: s.category || "EVIDENCE",
+      reviewState: "CONFIRMED",
+      provenance: "AI_SUGGESTED",
+      status: "EXTRACTED",
       weight: s.weight ?? 0.6,
       frequency: s.frequency,
       amount: s.amount,
+      timestamp: now,
       details: s.details,
-      evidenceRef: s.evidenceRef,
-      locator: s.locator,
-      status: "PENDING",
-      submittedBy: user.name,
-      created_at: now,
-    }]);
+      evidence_ids: s.evidence_ids || [],
+      source_type: "STAGING",
+      confidence: s.confidence ?? 0.8,
+    // created_at handled by insertOne
+  };
+    await db.relationships.insertOne(rel);
   }
+
   await db.innocent_pool.updateOne(poolId, { readded: true });
 
-  await auditRecord(caseId, user, "INNOCENT_POOL_READD",
-    `${user.name} re-admitted "${item.label}" from the Innocent pool to staging for fresh review.`,
-    item.kind === "ENTITY" ? "NODE" : "LINK", poolId, item.label, undefined, req.ip);
-  notifyCase(caseId, "STAGING_UPDATED", "Pool Re-admission",
-    `${user.name} sent "${item.label}" back to staging.`, user);
+  // Recompute graph analytics
+  const updatedEntities = await db.entities.find({ case_id: caseId });
+  const updatedLinks = await db.relationships.find({ case_id: caseId });
+  const { analyzedNodes, communities, cutVertices } = computeGraphAnalytics(toGraphNodes(updatedEntities), toGraphLinks(updatedLinks));
 
-  res.status(201).json({ success: true, batchId: newBatchId });
+  await auditRecord(caseId, user, "INNOCENT_POOL_READD",
+    `${user.name} re-admitted "${item.label}" from the Innocent pool directly to main graph.`,
+    item.kind === "ENTITY" ? "NODE" : "LINK", poolId, item.label, undefined, req.ip);
+  notifyCase(caseId, "GRAPH_RECOMPUTED", "Graph Recomputed After Pool Re-admission",
+    `${user.name} restored "${item.label}" from the Innocent pool — graph analytics updated.`, user);
+
+  await broadcastCaseUpdate(caseId, {
+    event_type: "GRAPH_RECOMPUTED",
+    title: "Graph Recomputed After Pool Re-admission",
+    message: `Entity/Link "${item.label}" restored from Innocent pool — graph analytics updated.`,
+    changes: { nodes: analyzedNodes.length, links: updatedLinks.length },
+    actor_name: user.name,
+    actor_role: user.role,
+  });
+
+  res.status(201).json({ success: true, readded: true, nodes: analyzedNodes.length, links: updatedLinks.length });
 });
 
 // ---------------------------------------------------------------------------
@@ -596,11 +627,8 @@ router.post("/:caseId/transfers/:transferId/accept", requireCaseMembership, requ
     }
   }
 
-  // Update case holding agency
-  const caseObj = await db.cases.findOne(caseId);
-  if (caseObj) {
-    (caseObj as any).leadAgency = transfer.toAgency;
-  }
+  // Update case holding agency (persisted — the mutated copy alone never reaches the vault)
+  await db.cases.updateOne(caseId, { leadAgency: transfer.toAgency } as any);
 
   const executionHash = sha256(`${transferId}|ACCEPT|${user._id}|${now}|${affectedMembers.join(",")}`);
   if (targetUser) {

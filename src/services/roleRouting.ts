@@ -1,6 +1,6 @@
 import { UserRole } from "../types";
 import { USER_ROLES, isAdmin, isForensic, isField, isLead, isCyber } from "../data/roles";
-import { DepartmentCode, DEPARTMENTS, DepartmentIdentity, agencyToDepartment, departmentFromGovId } from "../data/departments";
+import { DepartmentCode, DEPARTMENTS, DepartmentIdentity, agencyToDepartment, departmentForState, departmentFromGovId, detectGovTenant } from "../data/departments";
 
 export const AGENCY_ROLE_DEPARTMENT: Record<string, DepartmentCode> = {
   CBI_ADMIN: "CBI",
@@ -20,6 +20,8 @@ export const AGENCY_ROLE_DEPARTMENT: Record<string, DepartmentCode> = {
   CID_FIELD: "CID",
   POLICE_ADMIN: "STATE_POLICE",
   POLICE_LEAD: "STATE_POLICE",
+  POLICE_CYBER: "STATE_POLICE",
+  POLICE_FORENSIC: "STATE_POLICE",
   POLICE_FIELD: "STATE_POLICE",
 };
 
@@ -28,16 +30,20 @@ export function departmentForUser(
   agency: string,
   officialId?: string
 ): DepartmentIdentity {
-  // Gov-ID prefix wins (cbi_/nia_/cid_/police_kar_/police_mah_).
-  if (officialId) {
-    const { department } = departmentFromGovId(officialId);
-    // Only trust it when it agrees with the role's org, else prefer role mapping.
-    const mapped = AGENCY_ROLE_DEPARTMENT[role];
-    if (mapped && DEPARTMENTS[mapped].code === department.code) return department;
-    if (!mapped) return department;
+  // Officer ID is the source of truth: its badge prefix or gov-mail domain
+  // resolves the department (and sanctioned state palette) directly, so the
+  // frontend recolors to suit the signed-in officer.
+  if (officialId && detectGovTenant(officialId)) {
+    const { department, state } = departmentFromGovId(officialId);
+    // State police resolve to their sanctioned state palette.
+    if (department.code === "STATE_POLICE") return departmentForState(state);
+    return department;
   }
   const mapped = AGENCY_ROLE_DEPARTMENT[role];
-  if (mapped) return DEPARTMENTS[mapped];
+  if (mapped) {
+    if (mapped === "STATE_POLICE") return departmentForState(undefined);
+    return DEPARTMENTS[mapped];
+  }
   return agencyToDepartment(agency);
 }
 
