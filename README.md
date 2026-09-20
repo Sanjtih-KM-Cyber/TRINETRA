@@ -1,4 +1,4 @@
-# TRINETRA OS — The Third Eye of Investigation
+# TRINETRA OS - The Third Eye of Investigation
 
 > *तमसो मा ज्योतिर्गमय* — from darkness, lead me to light.
 
