@@ -8,21 +8,35 @@
  *   prefixed and the WS URL derives from it unless VITE_WS_URL overrides.
  */
 
-function readViteEnv(key: string): string | undefined {
+/**
+ * NOTE: Vite only inlines env vars accessed as literals
+ * (`import.meta.env.VITE_API_URL`). Dynamic access
+ * (`import.meta.env[key]`) compiles to a runtime `import.meta`
+ * lookup that is `undefined` in the browser bundle — the variable
+ * silently never lands. Do NOT "simplify" this back to a helper.
+ */
+function readViteApiUrl(): string {
   try {
-    const v = (import.meta as unknown as { env?: Record<string, string | undefined> })?.env?.[key];
+    const v = import.meta.env.VITE_API_URL;
     if (typeof v === "string" && v.trim()) return v.trim();
   } catch {
     /* non-Vite runtime (server bundle) — fall through */
   }
-  return undefined;
+  return "";
+}
+
+function readViteWsUrl(): string {
+  try {
+    const v = import.meta.env.VITE_WS_URL;
+    if (typeof v === "string" && v.trim()) return v.trim();
+  } catch {
+    /* non-Vite runtime (server bundle) — fall through */
+  }
+  return "";
 }
 
 /** Render backend origin, no trailing slash. "" = same-origin. */
-export const API_BASE: string = (() => {
-  const raw = readViteEnv("VITE_API_URL") || "";
-  return raw.replace(/\/+$/, "");
-})();
+export const API_BASE: string = readViteApiUrl().replace(/\/+$/, "");
 
 /** Prefix a "/api/..." (or any root-absolute) path with the backend origin. */
 export function apiUrl(path: string): string {
@@ -33,7 +47,7 @@ export function apiUrl(path: string): string {
 
 /** WebSocket endpoint for live case updates. */
 export function caseWsUrl(token: string): string {
-  const override = readViteEnv("VITE_WS_URL");
+  const override = readViteWsUrl();
   if (override) {
     const sep = override.includes("?") ? "&" : "?";
     return `${override}${sep}token=${encodeURIComponent(token)}`;
