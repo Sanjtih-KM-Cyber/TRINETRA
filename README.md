@@ -2,6 +2,12 @@
 
 > *तमसो मा ज्योतिर्गमय* — from darkness, lead me to light.
 
+[![Live App](https://img.shields.io/badge/Live_App-trinetraaixi.vercel.app-00b368?style=for-the-badge&logo=vercel&logoColor=white)](https://trinetraai-xi.vercel.app)
+[![Backend API](https://img.shields.io/badge/Backend_API-Render-ff5a57?style=for-the-badge&logo=render&logoColor=white)](https://trinetra-8ejj.onrender.com/healthz)
+[![Node 22](https://img.shields.io/badge/Node-22.x-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org)
+[![MongoDB](https://img.shields.io/badge/Vault-MongoDB-47A248?style=for-the-badge&logo=mongodb&logoColor=white)](https://www.mongodb.com)
+[![SAHAYAK AI](https://img.shields.io/badge/SAHAYAK_AI-Groq-orange?style=for-the-badge&logo=meta&logoColor=white)](https://console.groq.com)
+
 **Live app:** https://trinetraai-xi.vercel.app
 **Backend API:** https://trinetra-8ejj.onrender.com ([health](https://trinetra-8ejj.onrender.com/healthz))
 
@@ -40,6 +46,18 @@ Leads `Lead@123`, Forensics `Forensic@123`, Cyber/Field `Agency@123`
 1-click demo profiles. Every login additionally requires the tunnel OTP
 from step 2 (wrong OTP 5x locks the account pending Admin reactivation).
 
+## Roadmap — what's being built
+
+| Track | Now (in progress) | Next | Later |
+|---|---|---|---|
+| **Local LLM** | Cloud-first via Groq with Gemini failover | Ollama as default provider for air-gapped stations (`LOCAL_LLM_BASE_URL` already wired) — zero case-data egress | Quantized on-station models (llama.cpp) for zero-network posts |
+| **Federated LoRA mesh** | Peer config + Tailscale hostnames scaffolded (`MESH_PEERS`, `/api/sahayak/mesh`) | District-specialist adapters (legal-lora, narcotics-lora) shared station-to-station | Federated fine-tuning on closed case corpora |
+| **CCTNS / ICJS live link** | Gateway contract defined (`/api/cctns/*`, honest 501 until configured) | Wire to state CCTNS service over the VPN channel | Biometric / fingerprint search, FIR auto-pull |
+| **Field mobility** | Responsive UI + mobile bottom nav | Offline-first PWA: capture observations without signal, sync on reconnect | Native seizure/camera app with on-device hashing |
+| **Language access** | In-app language context + translate widget | Full Marathi / Hindi / Kannada UI strings | SAHAYAK answers drafted in the officer's language |
+| **Court readiness** | Dossier synthesis + PDF export, hash-chained audit ledger | E-signed dossiers, Sec 63 BSA exhibit certificates | e-Courts / ICJS filing integration |
+| **Ops hardening** | Rate limiting, OTP lockout, vault AES-256-GCM at rest | SMS gateway for production tunnel OTPs (currently on-screen demo OTP) | HSM-backed keys, security-headers pass |
+
 ## Run locally
 
 **Prerequisites:** Node.js 22+, optional MongoDB 7+ and Ollama.
@@ -53,7 +71,7 @@ npm run dev            # API + UI on http://localhost:3000
 Without `MONGO_URL` the server uses the in-memory vault (data resets on
 restart). Set `MONGO_URL=mongodb://127.0.0.1:27017` + `MONGO_DB=crimintel`
 for durable storage — the vault seeds itself (officers + demo cases) on
-first connect.
+first connect. Point `LOCAL_LLM_BASE_URL` at Ollama to run fully local AI.
 
 ## Deploy (Vercel frontend + Render backend)
 
