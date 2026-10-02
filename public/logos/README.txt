@@ -1,4 +1,4 @@
-﻿Official department emblem images go here. Served at /logos/<file>.
+Official department emblem images go here. Served at /logos/<file>.
 Expected filenames (see logoPath in src/data/departments.ts):
   cbi.png, nia.png, cid.png, police.png,
   mh.png, wb.png, kl.png, dl.png, gj.png, rj.png,
