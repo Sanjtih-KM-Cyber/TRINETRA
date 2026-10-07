@@ -21,7 +21,10 @@ cyber-intel cell.
 > **human intelligence** (field officers), **technical intelligence**
 > (forensic + cyber), and **synthesis** (SAHAYAK AI joining them into one
 > picture).
-
+\## 🎥 Demo Video\
+\
+[![▶ Watch Demo on Google Drive]\(https\://img.shields.io/badge/▶_Watch_Demo-Google_Drive-4285F4?style=for-the-badge&logo=google-drive&logoColor=white\)]\(https\://drive.google.com/file/d/1xh8LGPJdd6TRiDg3ilu9M0B5VPWHO60p/view?usp=sharing)\
+\
 ## Try it in 60 seconds
 
 1. Open the **live app** above — you'll land on the VPN gateway.
